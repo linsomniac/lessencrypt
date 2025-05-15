@@ -104,25 +104,46 @@ def wait_for_certificate(
     timeout: int,
     private_key: rsa.RSAPrivateKey,
     output_file: Path,
+    passphrase: Optional[str] = None,
 ) -> bool:
-    """Wait for a certificate from the server and decrypt it."""
+    """
+    Wait for a certificate from the server and decrypt it. 
+    Also saves the private key to a .key file, optionally encrypted with a passphrase.
+    """
     listener.settimeout(timeout)
     try:
         conn, addr = listener.accept()
         with conn:
-            # Read the certificate header
-            header = conn.recv(1024).decode()
-            if not header.startswith("cert v=1 payloadlength="):
-                print("Invalid certificate header", file=sys.stderr)
+            # Read the certificate header (should be text)
+            header_data = conn.recv(1024)
+            try:
+                # Try to find the newline separator between header and binary data
+                newline_pos = header_data.find(b'\n')
+                if newline_pos == -1:
+                    # If no newline found, assume it's all header
+                    header = header_data.decode('utf-8')
+                    remaining_data = b''
+                else:
+                    # Split into header and binary data
+                    header = header_data[:newline_pos+1].decode('utf-8')
+                    remaining_data = header_data[newline_pos+1:]
+                
+                if not header.startswith("cert v=1 payloadlength="):
+                    print("Invalid certificate header", file=sys.stderr)
+                    return False
+
+                # Parse the payload length
+                payload_length_str = header.split("payloadlength=")[1].split("\n")[0]
+                payload_length = int(payload_length_str)
+            except UnicodeDecodeError as e:
+                print(f"Error decoding certificate header: {e}", file=sys.stderr)
                 return False
 
-            # Parse the payload length
-            payload_length_str = header.split("payloadlength=")[1].split("\n")[0]
-            payload_length = int(payload_length_str)
-
-            # Read the payload
-            payload = b""
-            remaining = payload_length
+            # Read the payload, starting with any data already received
+            payload = remaining_data
+            remaining = payload_length - len(payload)
+            
+            # Continue reading until we have the full payload
             while remaining > 0:
                 chunk = conn.recv(min(4096, remaining))
                 if not chunk:
@@ -166,8 +187,30 @@ def wait_for_certificate(
             padding_length = decrypted[-1]
             decrypted = decrypted[:-padding_length]
 
-            # Write the decrypted payload to the output file
+            # Serialize the private key to PEM format
+            if passphrase:
+                # Encrypt the private key with the passphrase
+                encryption_algorithm = serialization.BestAvailableEncryption(passphrase.encode())
+            else:
+                # No encryption
+                encryption_algorithm = serialization.NoEncryption()
+                
+            private_key_pem = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=encryption_algorithm
+            )
+            
+            # Get the certificate file stem and parent directory
+            key_file = output_file.with_suffix(".key")
+            
+            # Write the private key to the key file
+            key_file.write_bytes(private_key_pem)
+            
+            # Write the decrypted certificate to the output file
             output_file.write_bytes(decrypted)
+            
+            # Success message already printed by the main function
             return True
     except socket.timeout:
         print(
@@ -205,6 +248,11 @@ def main() -> int:
         default=DEFAULT_KEY_SIZE,
         help="RSA key size in bits (default: 4096)",
     )
+    parser.add_argument(
+        "--passphrase",
+        type=str,
+        help="Passphrase to encrypt the private key (if not provided, the key is saved unencrypted)",
+    )
     args = parser.parse_args()
 
     # Generate RSA key pair
@@ -228,11 +276,17 @@ def main() -> int:
         # Wait for the certificate
         print("Waiting for certificate...")
         if not wait_for_certificate(
-            listener, args.timeout, private_key, args.output_file
+            listener, args.timeout, private_key, args.output_file, args.passphrase
         ):
             return 1
 
         print(f"Certificate saved to {args.output_file}")
+        key_file = args.output_file.with_suffix('.key')
+        if args.passphrase:
+            print(f"Encrypted private key saved to {key_file}")
+        else:
+            print(f"Private key saved to {key_file}")
+        print("Both files can be used directly with web servers like Apache or Nginx.")
         return 0
     finally:
         listener.close()

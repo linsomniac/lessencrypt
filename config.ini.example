@@ -5,15 +5,19 @@ listen_address = 0.0.0.0
 port = 334
 # Timeout in seconds for connections
 timeout = 60
-
-[ca]
+# Whether to allow connections to high ports (>=1024)
+# This is a security feature to prevent connections to unprivileged ports
+# Default is false, requiring clients to listen on a port < 1024
+allow_high_ports = false
+# Path to the hostname->CN+SAN mapping file
+mappings = /etc/lessencrypt/name_mapping.conf
 # Path to the CA certificate file (PEM format)
-cert_file = /etc/lessencrypt/ca.crt
+ca_cert_file = /etc/lessencrypt/ca.crt
 # Path to the CA private key file (PEM format)
-key_file = /etc/lessencrypt/ca.key
+ca_key_file = /etc/lessencrypt/ca.key
 # Password for the CA private key (if encrypted)
 # Leave commented out if the key is not encrypted
-# key_password = your-secure-password
+# ca_key_password = your-secure-password
 
 [certificate]
 # Certificate subject information
@@ -23,7 +27,3 @@ locality = San Francisco
 organization = LessEncrypt
 # Validity period in days
 validity_days = 365
-
-[mapping]
-# Path to the name mapping file
-file = /etc/lessencrypt/name_mapping.conf

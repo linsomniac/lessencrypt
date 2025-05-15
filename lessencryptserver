@@ -17,6 +17,7 @@ import argparse
 import base64
 import configparser
 import datetime
+import logging
 import os
 import re
 import socket
@@ -53,9 +54,9 @@ class ServerConfig:
         self.port = config.getint("server", "port", fallback=DEFAULT_PORT)
         self.timeout = config.getint("server", "timeout", fallback=DEFAULT_TIMEOUT)
 
-        self.ca_cert_file = Path(config.get("ca", "cert_file"))
-        self.ca_key_file = Path(config.get("ca", "key_file"))
-        self.ca_key_password = config.get("ca", "key_password", fallback=None)
+        self.ca_cert_file = Path(config.get("server", "ca_cert_file"))
+        self.ca_key_file = Path(config.get("server", "ca_key_file"))
+        self.ca_key_password = config.get("server", "ca_key_password", fallback=None)
 
         self.cert_country = config.get("certificate", "country", fallback="US")
         self.cert_state = config.get("certificate", "state", fallback="California")
@@ -70,7 +71,12 @@ class ServerConfig:
         )
 
         self.name_mapping_file = Path(
-            config.get("mapping", "file", fallback=DEFAULT_MAPPING_FILE)
+            config.get("server", "mappings", fallback=DEFAULT_MAPPING_FILE)
+        )
+
+        # Security settings
+        self.allow_high_ports = config.getboolean(
+            "server", "allow_high_ports", fallback=False
         )
 
 
@@ -96,36 +102,53 @@ def load_ca_cert_and_key(
 
 def parse_name_mapping(mapping_file: Path) -> List[Tuple[Pattern[str], str]]:
     """Parse the name mapping file."""
+    logging.info(f"Parsing name mapping file: {mapping_file}")
     mappings = []
+    line_number = 0
+
     with open(mapping_file, "r") as f:
         for line in f:
+            line_number += 1
             line = line.strip()
             if not line or line.startswith("#"):
+                logging.debug(f"Line {line_number}: Skipping comment or empty line")
                 continue
 
             # Extract the regex and template parts
             match = re.match(r"^/(.*)/\s+(.*)$", line)
             if not match:
+                logging.warning(f"Line {line_number}: Invalid mapping format: {line}")
                 print(f"Invalid mapping line: {line}", file=sys.stderr)
                 continue
 
             regex_str, template_str = match.groups()
+            logging.debug(
+                f"Line {line_number}: Extracted regex='{regex_str}', template='{template_str}'"
+            )
             try:
                 regex = re.compile(regex_str)
                 mappings.append((regex, template_str))
+                logging.debug(f"Line {line_number}: Successfully compiled regex")
             except re.error as e:
+                logging.warning(f"Line {line_number}: Invalid regex '{regex_str}': {e}")
                 print(f"Invalid regex in mapping: {regex_str} - {e}", file=sys.stderr)
 
+    logging.info(f"Loaded {len(mappings)} name mappings from {mapping_file}")
     return mappings
 
 
 def lookup_reverse_dns(ip_address: str) -> Optional[str]:
     """Look up the reverse DNS of an IP address."""
     try:
+        logging.debug(f"Converting {ip_address} to reverse address")
         addr = dns.reversename.from_address(ip_address)
+        logging.debug(f"Looking up PTR record for {addr}")
         answers = dns.resolver.resolve(addr, "PTR")
-        return str(answers[0]).rstrip(".")
+        hostname = str(answers[0]).rstrip(".")
+        logging.debug(f"Found hostname: {hostname}")
+        return hostname
     except Exception as e:
+        logging.warning(f"Reverse DNS lookup failed for {ip_address}: {e}")
         print(f"Reverse DNS lookup failed for {ip_address}: {e}", file=sys.stderr)
         return None
 
@@ -134,14 +157,18 @@ def match_hostname(
     hostname: str, mappings: List[Tuple[Pattern[str], str]]
 ) -> Optional[List[str]]:
     """Match a hostname against the name mappings."""
+    logging.debug(f"Matching hostname: {hostname}")
+
     # Parse hostname into components
     parts = hostname.split(".")
     if len(parts) >= 2:
         host = parts[0]
         domain = ".".join(parts[1:])
+        logging.debug(f"Parsed hostname into host={host}, domain={domain}")
     else:
         host = hostname
         domain = ""
+        logging.debug(f"Hostname has no domain part, using host={host}")
 
     context = {
         "fqdn": hostname,
@@ -151,13 +178,21 @@ def match_hostname(
     }
 
     # Try to match the hostname against the mappings
-    for regex, template_str in mappings:
+    for i, (regex, template_str) in enumerate(mappings):
+        logging.debug(f"Trying mapping #{i+1}: /{regex.pattern}/")
         if regex.search(hostname):
+            logging.debug(f"Matched regex: /{regex.pattern}/")
             # Render the template
             template = Template(template_str)
             rendered = template.render(**context)
-            return rendered.split()
+            cert_names = rendered.split()
+            logging.debug(f"Template rendered to: {rendered}")
+            logging.info(
+                f"Hostname {hostname} matched to CN={cert_names[0]} and SANs={cert_names[1:] if len(cert_names) > 1 else []}"
+            )
+            return cert_names
 
+    logging.debug(f"No mapping matched hostname: {hostname}")
     return None
 
 
@@ -203,7 +238,7 @@ def generate_certificate(
     builder = builder.serial_number(x509.random_serial_number())
 
     # Set validity period
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.UTC)
     builder = builder.not_valid_before(now)
     builder = builder.not_valid_after(
         now + datetime.timedelta(days=config.cert_validity_days)
@@ -300,17 +335,25 @@ def handle_client(
 ) -> None:
     """Handle a client connection."""
     client_ip = client_address[0]
+    client_port = client_address[1]
+    logging.info(f"Handling client {client_ip}:{client_port}")
 
     try:
         # Look up reverse DNS
+        logging.info(f"Looking up reverse DNS for {client_ip}")
         hostname = lookup_reverse_dns(client_ip)
         if not hostname:
+            logging.warning(f"Failed to resolve hostname for {client_ip}")
             client_socket.sendall(b"error msg=Failed to resolve hostname\n")
             return
 
+        logging.info(f"Resolved {client_ip} to {hostname}")
+
         # Match hostname against mappings
+        logging.debug(f"Matching hostname {hostname} against name mappings")
         cert_names = match_hostname(hostname, mappings)
         if not cert_names:
+            logging.warning(f"No mapping found for hostname {hostname}")
             client_socket.sendall(
                 f"error msg=No mapping found for {hostname}\n".encode()
             )
@@ -318,56 +361,106 @@ def handle_client(
 
         common_name = cert_names[0]
         sans = cert_names[1:]
+        logging.info(f"Using common name {common_name} for certificate")
+        logging.debug(f"Using SANs: {sans}")
 
         # Read the key request
-        data = client_socket.recv(8192).decode()
-        if not data.startswith("keyreq v=1 pubkey="):
-            client_socket.sendall(b"error msg=Invalid key request format\n")
-            return
+        logging.debug("Waiting for key request from client")
+        raw_data = client_socket.recv(8192)
+        try:
+            data = raw_data.decode("utf-8")
+            if not data.startswith("keyreq v=1 pubkey="):
+                logging.warning("Invalid key request format")
+                client_socket.sendall(b"error msg=Invalid key request format\n")
+                return
 
-        # Extract the public key
-        pubkey_b64 = data.split("pubkey=")[1].strip()
+            # Extract the public key
+            pubkey_b64 = data.split("pubkey=")[1].strip()
+            logging.debug("Received public key (base64 encoded)")
+        except UnicodeDecodeError:
+            logging.warning("Invalid encoding in key request")
+            client_socket.sendall(b"error msg=Invalid encoding in key request\n")
+            return
         try:
             pubkey_pem = base64.b64decode(pubkey_b64)
             client_public_key = serialization.load_pem_public_key(pubkey_pem)
             if not isinstance(client_public_key, rsa.RSAPublicKey):
+                logging.warning("Received key is not an RSA public key")
                 raise TypeError("Public key is not an RSA public key")
+            logging.debug("Successfully loaded RSA public key")
         except Exception as e:
+            logging.warning(f"Invalid public key: {e}")
             client_socket.sendall(f"error msg=Invalid public key: {e}\n".encode())
             return
 
         # Send acknowledgment
+        logging.debug("Sending acknowledgment to client")
         client_socket.sendall(b"ok\n")
         client_socket.close()
 
         # Generate a certificate
+        logging.info("Generating certificate")
         certificate = generate_certificate(
             pubkey_pem, common_name, sans, ca_cert, ca_key, config
+        )
+        logging.debug(
+            f"Certificate generated with serial number {certificate.serial_number}"
         )
 
         # Serialize the certificate
         cert_bytes = certificate.public_bytes(serialization.Encoding.PEM)
+        logging.debug(f"Certificate serialized ({len(cert_bytes)} bytes)")
 
         # Generate a session key
+        logging.debug("Generating AES session key")
         session_key = generate_session_key()
 
         # Encrypt the payload
+        logging.debug("Encrypting certificate with session key")
         encrypted_payload = encrypt_payload(session_key, cert_bytes, client_public_key)
+        logging.debug(f"Encrypted payload size: {len(encrypted_payload)} bytes")
 
-        # Connect back to the client
+        # Check if client port is allowed
+        if client_port >= 1024 and not config.allow_high_ports:
+            logging.warning(
+                f"Refusing to connect back to high port {client_port} (allow_high_ports=false)"
+            )
+            raise ValueError(
+                f"Security policy prohibits connection to high ports (>= 1024): {client_port}"
+            )
+
+        # Connect back to the client using the same port they connected from
+        logging.info(f"Connecting back to client at {hostname}:{client_port}")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(config.timeout)
-            sock.connect((hostname, config.port))
+            try:
+                sock.connect((hostname, client_port))
+                logging.debug(f"Successfully connected to {hostname}:{client_port}")
+            except Exception as e:
+                logging.error(f"Failed to connect to {hostname}:{client_port}: {e}")
+                raise
 
             # Send the certificate
+            logging.debug("Sending encrypted certificate to client")
+            # Make sure there's a clear separation between the text header and binary payload
             sock.sendall(f"cert v=1 payloadlength={len(encrypted_payload)}\n".encode())
+
+            # Small delay to ensure header and payload don't get mixed in TCP buffer
+            import time
+
+            time.sleep(0.1)
+
+            # Send the binary payload
             sock.sendall(encrypted_payload)
+            logging.info("Certificate delivery completed successfully")
 
     except Exception as e:
+        logging.error(f"Error handling client {client_ip}: {e}", exc_info=True)
         print(f"Error handling client {client_ip}: {e}", file=sys.stderr)
         try:
             client_socket.sendall(f"error msg={str(e)}\n".encode())
         except:
+            logging.debug("Failed to send error message to client")
             pass
 
 
@@ -391,40 +484,76 @@ def main() -> int:
         type=int,
         help="Connection timeout in seconds (overrides config file)",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging (INFO level)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging (DEBUG level)",
+    )
     args = parser.parse_args()
+
+    # Configure logging
+    log_format = "%(asctime)s - %(levelname)s - %(message)s"
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG, format=log_format)
+        logging.debug("Debug logging enabled")
+    elif args.verbose:
+        logging.basicConfig(level=logging.INFO, format=log_format)
+        logging.info("Verbose logging enabled")
+    else:
+        logging.basicConfig(level=logging.WARNING, format=log_format)
 
     try:
         # Load configuration
         config = ServerConfig(args.config)
+        logging.info(f"Configuration loaded from {args.config}")
 
         # Apply command-line overrides
         if args.listen:
+            logging.info(f"Overriding listen address with {args.listen}")
             config.listen_address = args.listen
         if args.port:
+            logging.info(f"Overriding port with {args.port}")
             config.port = args.port
         if args.timeout:
+            logging.info(f"Overriding timeout with {args.timeout} seconds")
             config.timeout = args.timeout
 
         # Load CA certificate and key
+        logging.info(f"Loading CA certificate from {config.ca_cert_file}")
+        logging.info(f"Loading CA key from {config.ca_key_file}")
         ca_cert, ca_key = load_ca_cert_and_key(config)
+        logging.debug(f"CA certificate subject: {ca_cert.subject}")
 
         # Parse name mappings
+        logging.info(f"Loading name mappings from {config.name_mapping_file}")
         mappings = parse_name_mapping(config.name_mapping_file)
+        logging.debug(f"Loaded {len(mappings)} name mappings")
 
         # Create the server socket
+        logging.info("Creating server socket")
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((config.listen_address, config.port))
         server_socket.listen(5)
 
+        logging.info(f"Server listening on {config.listen_address}:{config.port}")
         print(f"Server listening on {config.listen_address}:{config.port}")
 
         while True:
             # Accept client connections
             client_socket, client_address = server_socket.accept()
+            logging.info(
+                f"Accepted connection from {client_address[0]}:{client_address[1]}"
+            )
             client_socket.settimeout(config.timeout)
 
             # Handle the client in a new thread
+            logging.debug(f"Starting client handler thread for {client_address[0]}")
             thread = threading.Thread(
                 target=handle_client,
                 args=(client_socket, client_address, config, ca_cert, ca_key, mappings),
@@ -433,9 +562,11 @@ def main() -> int:
             thread.start()
 
     except KeyboardInterrupt:
+        logging.info("Server stopped by user")
         print("Server stopped by user", file=sys.stderr)
         return 0
     except Exception as e:
+        logging.error(f"Server error: {e}", exc_info=True)
         print(f"Server error: {e}", file=sys.stderr)
         return 1
 
