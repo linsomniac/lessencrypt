@@ -19,6 +19,7 @@ import configparser
 import datetime
 import logging
 import os
+import random
 import re
 import socket
 import sys
@@ -40,6 +41,18 @@ DEFAULT_PORT = 334
 DEFAULT_TIMEOUT = 60
 DEFAULT_CONFIG_FILE = "/etc/lessencrypt/lessencrypt.cfg"
 DEFAULT_MAPPING_FILE = "/etc/lessencrypt/name_mapping.conf"
+
+
+def generate_random_hex_serial() -> int:
+    """Generate a random serial number as 16 lowercase hex digits.
+
+    Returns:
+        The serial number as an integer parsed from the hex string.
+    """
+    # Generate 16 random hex digits (64 bits)
+    hex_serial = "".join(random.choice("0123456789abcdef") for _ in range(16))
+    # Convert to integer
+    return int(hex_serial, 16)
 
 
 class ServerConfig:
@@ -196,9 +209,7 @@ def match_hostname(
     return None
 
 
-def generate_session_key() -> bytes:
-    """Generate a random AES-256 session key."""
-    return os.urandom(32)  # 256 bits
+# Session key generation removed - no longer needed as we send unencrypted payload
 
 
 def generate_certificate(
@@ -234,8 +245,8 @@ def generate_certificate(
     # Set the issuer (from the CA)
     builder = builder.issuer_name(ca_cert.subject)
 
-    # Generate a random serial number
-    builder = builder.serial_number(x509.random_serial_number())
+    # Generate a random serial number (16 lowercase hex digits)
+    builder = builder.serial_number(generate_random_hex_serial())
 
     # Set validity period
     now = datetime.datetime.now(datetime.UTC)
@@ -294,35 +305,19 @@ def generate_certificate(
     return certificate
 
 
-def encrypt_payload(
-    session_key: bytes, payload: bytes, client_public_key: rsa.RSAPublicKey
-) -> bytes:
-    """Encrypt the payload with the session key and encrypt the session key with the client's public key."""
-    # Encrypt the session key
-    encrypted_session_key = client_public_key.encrypt(
-        session_key,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None,
-        ),
-    )
+def prepare_payload(payload: bytes, client_public_key: rsa.RSAPublicKey, ca_cert: x509.Certificate) -> bytes:
+    """Prepare the payload for delivery to the client.
 
-    # Generate a random IV
-    iv = os.urandom(16)
-
-    # Add PKCS#7 padding to payload
-    block_size = 16
-    padding_length = block_size - (len(payload) % block_size)
-    padded_payload = payload + bytes([padding_length] * padding_length)
-
-    # Encrypt the payload with AES-CBC
-    cipher = Cipher(algorithms.AES(session_key), modes.CBC(iv))
-    encryptor = cipher.encryptor()  # type: ignore
-    encrypted_payload = encryptor.update(padded_payload) + encryptor.finalize()
-
-    # Combine encrypted session key, IV, and encrypted payload
-    return bytes(encrypted_session_key + iv + encrypted_payload)
+    Since the payload is public information (certificates), we no longer encrypt it.
+    We return the client certificate followed by the CA certificate.
+    """
+    # Get CA certificate in PEM format
+    ca_cert_bytes = ca_cert.public_bytes(serialization.Encoding.PEM)
+    
+    # Combine client certificate and CA certificate
+    combined_payload = payload + ca_cert_bytes
+    
+    return combined_payload
 
 
 def handle_client(
@@ -425,21 +420,17 @@ def handle_client(
             pubkey_pem, common_name, sans, ca_cert, ca_key, config
         )
         logging.debug(
-            f"Certificate generated with serial number {certificate.serial_number}"
+            f"Certificate generated with serial number {certificate.serial_number} (hex: {certificate.serial_number:x})"
         )
 
         # Serialize the certificate
         cert_bytes = certificate.public_bytes(serialization.Encoding.PEM)
         logging.debug(f"Certificate serialized ({len(cert_bytes)} bytes)")
 
-        # Generate a session key
-        logging.debug("Generating AES session key")
-        session_key = generate_session_key()
-
-        # Encrypt the payload
-        logging.debug("Encrypting certificate with session key")
-        encrypted_payload = encrypt_payload(session_key, cert_bytes, client_public_key)
-        logging.debug(f"Encrypted payload size: {len(encrypted_payload)} bytes")
+        # Prepare payload (no encryption needed as it's public information)
+        logging.debug("Preparing certificate payload (client cert + CA cert)")
+        payload = prepare_payload(cert_bytes, client_public_key, ca_cert)
+        logging.debug(f"Payload size: {len(payload)} bytes (includes client cert and CA cert)")
 
         # Check if client port is allowed
         if client_specified_port >= 1024 and not config.allow_high_ports:
@@ -466,17 +457,17 @@ def handle_client(
                 raise
 
             # Send the certificate
-            logging.debug("Sending encrypted certificate to client")
-            # Make sure there's a clear separation between the text header and binary payload
-            sock.sendall(f"cert v=1 payloadlength={len(encrypted_payload)}\n".encode())
+            logging.debug("Sending certificate to client")
+            # Make sure there's a clear separation between the text header and payload
+            sock.sendall(f"cert v=2 payloadlength={len(payload)}\n".encode())
 
             # Small delay to ensure header and payload don't get mixed in TCP buffer
             import time
 
             time.sleep(0.1)
 
-            # Send the binary payload
-            sock.sendall(encrypted_payload)
+            # Send the payload
+            sock.sendall(payload)
             logging.info("Certificate delivery completed successfully")
 
     except Exception as e:

@@ -36,8 +36,7 @@ black lessencryptcli lessencryptserver
 1. Client generates RSA key pair
 2. Client connects to server and sends public key
 3. Server acknowledges with "ok"
-4. Server generates AES session key, encrypts with client's public key
-5. Server connects back to client, sends encrypted session key and payload
-6. Client decrypts session key with private key
-7. Client decrypts payload with session key
-8. Client saves decrypted payload to file
+4. Server generates certificate signed by its CA
+5. Server connects back to client, sends the certificate as unencrypted payload
+6. Client saves the certificate and private key to files
+7. The certificate and private key can be used with web servers or other TLS services

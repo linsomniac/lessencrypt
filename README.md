@@ -95,8 +95,8 @@ Options:
 3. Server validates the client (using reverse DNS and name mappings)
 4. Server generates a certificate, signed by its CA
 5. Server establishes a return connection to client
-6. Server sends the encrypted certificate
-7. Client decrypts and saves both certificate and private key
+6. Server sends the certificate (unencrypted as it's public information)
+7. Client saves both certificate and private key
 8. Certificate can now be used with web servers or other services
 
 ## 🛡️ Security Features

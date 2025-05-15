@@ -18,9 +18,9 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+# We keep the padding import in case we need to handle v1 protocol in the future
 
 DEFAULT_PORT = 334
 DEFAULT_TIMEOUT = 60
@@ -109,10 +109,16 @@ def wait_for_certificate(
     private_key: rsa.RSAPrivateKey,
     output_file: Path,
     passphrase: Optional[str] = None,
+    key_file: Optional[Path] = None,
+    ca_file: Optional[Path] = None,
 ) -> bool:
     """
     Wait for a certificate from the server and decrypt it. 
-    Also saves the private key to a .key file, optionally encrypted with a passphrase.
+    
+    Saves the private key, client certificate, and CA certificate according to the options:
+    - If key_file is None, private key is included in output_file
+    - If ca_file is None, CA certificate is included in output_file
+    - If both key_file and ca_file are specified, only client cert is in output_file
     """
     listener.settimeout(timeout)
     try:
@@ -121,18 +127,26 @@ def wait_for_certificate(
             # Read the certificate header (should be text)
             header_data = conn.recv(1024)
             try:
-                # Try to find the newline separator between header and binary data
+                # Try to find the newline separator between header and payload
                 newline_pos = header_data.find(b'\n')
                 if newline_pos == -1:
                     # If no newline found, assume it's all header
                     header = header_data.decode('utf-8')
                     remaining_data = b''
                 else:
-                    # Split into header and binary data
+                    # Split into header and payload data
                     header = header_data[:newline_pos+1].decode('utf-8')
                     remaining_data = header_data[newline_pos+1:]
                 
-                if not header.startswith("cert v=1 payloadlength="):
+                # Check for both v1 (encrypted) and v2 (unencrypted) protocol versions
+                if header.startswith("cert v=1 payloadlength="):
+                    print("Warning: Server is using deprecated encrypted protocol v1", file=sys.stderr)
+                    print("Please update server to use unencrypted protocol v2", file=sys.stderr)
+                    return False
+                elif header.startswith("cert v=2 payloadlength="):
+                    # This is the current protocol version (unencrypted)
+                    pass
+                else:
                     print("Invalid certificate header", file=sys.stderr)
                     return False
 
@@ -162,39 +176,32 @@ def wait_for_certificate(
                 )
                 return False
 
-            # The first part of the payload is the encrypted session key
-            # The rest is the encrypted certificate
-            # We'll assume the first 512 bytes are the encrypted session key
-            encrypted_session_key = payload[:512]
-            encrypted_payload = payload[512:]
-
-            # Decrypt the session key
-            session_key = private_key.decrypt(
-                encrypted_session_key,
-                padding.OAEP(
-                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None,
-                ),
-            )
-
-            # Decrypt the payload using the session key
-            # Assume the first 16 bytes of the encrypted payload are the IV
-            iv = encrypted_payload[:16]
-            ciphertext = encrypted_payload[16:]
-
-            cipher = Cipher(algorithms.AES(session_key), modes.CBC(iv))
-            decryptor = cipher.decryptor()  # type: ignore
-            decrypted = decryptor.update(ciphertext) + decryptor.finalize()
-
-            # Remove PKCS#7 padding
-            padding_length = decrypted[-1]
-            decrypted = decrypted[:-padding_length]
-
+            # In protocol v2, the payload is the certificate directly (no encryption)
+            # The payload should contain both client cert and CA cert
+            decrypted = payload
+            
+            # Split the client cert and CA cert if present
+            # PEM certificates are delimited by the standard header/footer
+            # Look for two certificates in the payload
+            cert_parts = decrypted.split(b"-----BEGIN CERTIFICATE-----")
+            
+            if len(cert_parts) < 2:
+                print("Warning: Payload does not contain multiple certificates. CA cert may be missing.", file=sys.stderr)
+                client_cert = decrypted
+                ca_cert = None
+            else:
+                # First part is empty (before first BEGIN marker)
+                # Reconstruct the certificates with their headers
+                client_cert = b"-----BEGIN CERTIFICATE-----" + cert_parts[1]
+                if len(cert_parts) > 2:
+                    ca_cert = b"-----BEGIN CERTIFICATE-----" + cert_parts[2]
+                else:
+                    ca_cert = None
+            
             # Serialize the private key to PEM format
             if passphrase:
                 # Encrypt the private key with the passphrase
-                encryption_algorithm = serialization.BestAvailableEncryption(passphrase.encode())
+                encryption_algorithm: serialization.KeySerializationEncryption = serialization.BestAvailableEncryption(passphrase.encode())
             else:
                 # No encryption
                 encryption_algorithm = serialization.NoEncryption()
@@ -205,14 +212,24 @@ def wait_for_certificate(
                 encryption_algorithm=encryption_algorithm
             )
             
-            # Get the certificate file stem and parent directory
-            key_file = output_file.with_suffix(".key")
+            # Determine where to write the key file
+            key_file_path = key_file if key_file else output_file.with_suffix(".key")
             
-            # Write the private key to the key file
-            key_file.write_bytes(private_key_pem)
+            # Write the private key
+            key_file_path.write_bytes(private_key_pem)
             
-            # Write the decrypted certificate to the output file
-            output_file.write_bytes(decrypted)
+            # Handle writing the certificates according to options
+            if ca_file and ca_cert:
+                # Write CA cert to separate file
+                ca_file.write_bytes(ca_cert)
+                # Write only client cert to output file
+                output_file.write_bytes(client_cert)
+            elif ca_cert:
+                # Combine client and CA certs in output file
+                output_file.write_bytes(client_cert + ca_cert)
+            else:
+                # Only client cert available
+                output_file.write_bytes(client_cert)
             
             # Success message already printed by the main function
             return True
@@ -257,6 +274,16 @@ def main() -> int:
         type=str,
         help="Passphrase to encrypt the private key (if not provided, the key is saved unencrypted)",
     )
+    parser.add_argument(
+        "--key-file",
+        type=Path,
+        help="Write the private key to this file (if specified, key is not included in output file)",
+    )
+    parser.add_argument(
+        "--ca-file",
+        type=Path,
+        help="Write the CA certificate to this file (if specified, CA cert is not included in output file)",
+    )
     args = parser.parse_args()
 
     # Generate RSA key pair
@@ -280,17 +307,36 @@ def main() -> int:
         # Wait for the certificate
         print("Waiting for certificate...")
         if not wait_for_certificate(
-            listener, args.timeout, private_key, args.output_file, args.passphrase
+            listener, args.timeout, private_key, args.output_file, 
+            args.passphrase, args.key_file, args.ca_file
         ):
             return 1
 
         print(f"Certificate saved to {args.output_file}")
-        key_file = args.output_file.with_suffix('.key')
+        
+        # Success message for key file
+        key_file_path = args.key_file if args.key_file else args.output_file.with_suffix('.key')
         if args.passphrase:
-            print(f"Encrypted private key saved to {key_file}")
+            print(f"Encrypted private key saved to {key_file_path}")
         else:
-            print(f"Private key saved to {key_file}")
-        print("Both files can be used directly with web servers like Apache or Nginx.")
+            print(f"Private key saved to {key_file_path}")
+            
+        # Success message for CA file if specified
+        if args.ca_file:
+            print(f"CA certificate saved to {args.ca_file}")
+            
+        # Determine which files are included in output file
+        if args.ca_file and args.key_file:
+            print("Client certificate saved to output file")
+            print(f"All files can be used directly with web servers like Apache or Nginx.")
+        elif args.ca_file:
+            print("Client certificate saved to output file (CA in separate file)")
+            print(f"These files can be used directly with web servers like Apache or Nginx.")
+        elif args.key_file:
+            print("Client and CA certificates saved to output file")
+            print(f"These files can be used directly with web servers like Apache or Nginx.")
+        else:
+            print("Client certificate, CA certificate, and private key files can be used directly with web servers like Apache or Nginx.")
         return 0
     finally:
         listener.close()
