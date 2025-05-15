@@ -15,10 +15,11 @@ import argparse
 import base64
 import socket
 import sys
-from typing import Optional, Tuple
 from pathlib import Path
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import serialization, hashes
+from typing import Optional, Tuple
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 DEFAULT_PORT = 334
@@ -54,6 +55,18 @@ def start_listener(port: int) -> socket.socket:
     listener.bind(("0.0.0.0", port))
     listener.listen(1)
     return listener
+
+
+def parse_server_address(server_address: str, default_port: int) -> Tuple[str, int]:
+    """Parse server address with optional port (format: hostname:port)."""
+    if ":" in server_address:
+        host, port_str = server_address.rsplit(":", 1)
+        try:
+            return host, int(port_str)
+        except ValueError:
+            # If port is not a valid integer, treat the whole string as the address
+            return server_address, default_port
+    return server_address, default_port
 
 
 def connect_to_server(
@@ -178,7 +191,7 @@ def main() -> int:
         "--port",
         type=int,
         default=DEFAULT_PORT,
-        help="Port to connect to (default: 334)",
+        help="Port to connect to (default: 334, can also be specified as part of server_address using hostname:port format)",
     )
     parser.add_argument(
         "--timeout",
@@ -199,16 +212,17 @@ def main() -> int:
     private_key, public_key = generate_keypair(args.key_size)
     pubkey_b64 = public_key_to_base64(public_key)
 
+    # Parse the server address to check for embedded port
+    server_host, server_port = parse_server_address(args.server_address, args.port)
+
     # Start listening for the certificate
     print(f"Starting listener on port {args.port}...")
     listener = start_listener(args.port)
 
     try:
         # Connect to the server and send the public key
-        print(f"Connecting to server {args.server_address}:{args.port}...")
-        if not connect_to_server(
-            args.server_address, args.port, pubkey_b64, args.timeout
-        ):
+        print(f"Connecting to server {server_host}:{server_port}...")
+        if not connect_to_server(server_host, server_port, pubkey_b64, args.timeout):
             return 1
 
         # Wait for the certificate
@@ -226,3 +240,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# vim: set filetype=python :

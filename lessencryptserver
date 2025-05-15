@@ -16,23 +16,24 @@ Manages client connections, key processing, and certificate generation.
 import argparse
 import base64
 import configparser
+import datetime
 import os
 import re
 import socket
 import sys
 import threading
-from typing import Dict, List, Optional, Tuple, Any
-from re import Pattern
 from pathlib import Path
+from re import Pattern
+from typing import Any, Dict, List, Optional, Tuple
+
 import dns.resolver
 import dns.reversename
 from cryptography import x509
-from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.x509.oid import NameOID
 from jinja2 import Template
-import datetime
 
 DEFAULT_PORT = 334
 DEFAULT_TIMEOUT = 60
@@ -441,3 +442,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# vim: set filetype=python :
