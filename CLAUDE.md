@@ -6,29 +6,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LessEncrypt is a certificate encryption and decryption system with a client-server architecture using public key handshaking. The system consists of:
 
-- `client.py`: Handles key generation, server connection, and payload decryption
-- `server.py`: Manages client connections, key processing, and payload encryption
+- `lessencryptcli`: Handles key generation, server connection, and certificate decryption
+- `lessencryptserver`: Manages client connections, key processing, and certificate signing
 
 ## Development Commands
 
 ### Running the Server
 ```bash
-./server.py PATH_TO_PAYLOAD_FILE [--listen IP] [--port PORT] [--timeout SECONDS]
+./lessencryptserver [--config CONFIG_PATH] [--listen IP] [--port PORT] [--timeout SECONDS] [--verbose] [--debug]
 ```
 
 ### Running the Client
 ```bash
-./client.py SERVER_ADDRESS OUTPUT_FILE [--timeout SECONDS] [--port PORT]
+./lessencryptcli SERVER_ADDRESS OUTPUT_FILE [--port PORT] [--timeout SECONDS] [--key-size BITS] [--passphrase PASSPHRASE]
 ```
 
 ### Type Checking
 ```bash
-mypy --strict client.py server.py
+mypy --strict lessencryptcli lessencryptserver
 ```
 
 ### Code Formatting
 ```bash
-black client.py server.py
+black lessencryptcli lessencryptserver
 ```
 
 ## Protocol Flow

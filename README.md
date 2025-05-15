@@ -40,7 +40,7 @@ LessEncrypt simplifies certificate management for internal systems by providing 
 2. Copy and modify the configuration files:
    ```bash
    sudo mkdir -p /etc/lessencrypt
-   sudo cp config.ini.example /etc/lessencrypt/config.ini
+   sudo cp lessencrypt.cfg.example /etc/lessencrypt/lessencrypt.cfg
    sudo cp name_mapping.conf.example /etc/lessencrypt/name_mapping.conf
    ```
 
@@ -65,7 +65,7 @@ The server signs certificate requests and delivers them to clients.
 ```
 
 Options:
-- `--config`: Path to configuration file (default: /etc/lessencrypt/config.ini)
+- `--config`: Path to configuration file (default: /etc/lessencrypt/lessencrypt.cfg)
 - `--listen`: IP address to listen on (overrides config file)
 - `--port`: Port to listen on (overrides config file)
 - `--timeout`: Connection timeout in seconds (overrides config file)
@@ -109,7 +109,7 @@ Options:
 
 ## 📝 Configuration
 
-### Server Configuration (config.ini)
+### Server Configuration (lessencrypt.cfg)
 
 The server configuration file controls all aspects of certificate generation:
 

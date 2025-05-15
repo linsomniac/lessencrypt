@@ -38,7 +38,7 @@ from jinja2 import Template
 
 DEFAULT_PORT = 334
 DEFAULT_TIMEOUT = 60
-DEFAULT_CONFIG_FILE = "/etc/lessencrypt/config.ini"
+DEFAULT_CONFIG_FILE = "/etc/lessencrypt/lessencrypt.cfg"
 DEFAULT_MAPPING_FILE = "/etc/lessencrypt/name_mapping.conf"
 
 
