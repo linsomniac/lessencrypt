@@ -2,17 +2,51 @@ This is a Python program with a client and a server component.  Both programs sh
 use the "uv script" mechanism for a "#!" line and to specify requirements, and use
 black formatting, type annotations, and type checking with mypy.
 
-The client needs to:
-  Generate a public/private keypair.
-  Start listening on port 334/tcp (it does not need to process data from 334 until after
-      the next step so this does not need to be threaded).
-  Connect to a specified server on port 334/tcp and send the message "keyreq v=1
-      pubkey=[base64 encoded public key]\n" and then wait for the response "ok\n".
-  Wait for a connection on port 334/tcp for up to a configured timeout.
-      Read a line from the client which should be of the form: "cert v=1 sessionkey=[base64
-      encoded encryption session key, an AES 256 key encrypted with the public key we sent]
-      payloadlength=[bytes in certificate stream]\n".
-  It then should read the specified number of bytes from the socket, and close the socket.
-  It should then decrypt the session key using the private key generated above.
-  Then use the session key to decrypt the payload.
-  Then write the decrypted payload to a file which is given on the command-line.
+The client, lessencryptcli, needs to:
+  - Generate a public/private keypair.
+  - Start listening on port 334/tcp (it does not need to process data from 334 until after
+    the next step so this does not need to be threaded).
+  - The RSA key length defaults to 4096 bits but can be configured on the cli.
+  - Connect to a specified server on port 334/tcp and send the message "keyreq v=1
+    pubkey=[base64 encoded RSA public key]\n" and then wait for a response line from the
+    server.
+  - If the response is "error msg=[XXX]\n" display the error message and exit.
+  - If the response is "ok\n" close the connection and continue.
+  - Wait for a connection on port 334/tcp for up to a configured timeout.
+    Read a line from the client which should be of the form: "cert v=1
+    payloadlength=[bytes in certificate stream]\n".
+  - It then should read the specified number of bytes from the socket, and close the socket.
+  - It should then decrypt the session key using the private key generated above.
+  - Then use the session key to decrypt the payload.
+  - Then write the decrypted payload to a file which is given on the command-line.
+
+The server, lessencryptserver, needs to:
+  - Read configuration items from a config file.
+  - Listen on port 334 for connections.
+  - When a connection comes in, fork off to handle that request and continue listening for
+    new connections.
+  - Remember the IP address that the connection came from.
+  - Look up the reverse DNS of the IP addess of the client and obtain a name.
+    If the reverse DNS cannot be looked up, the server should respond "error msg=[ERROR
+    MESSAGE]\n" and close the connection.
+  - Read a "name mapping" file and look up the hostname, as follows:
+    - Each line is of the form: "/REGEX/ [JINJA TEMPLATE]".
+    - The first regex that matches the hostname will be the entry used.
+    - The hostname will be split into values for "fqdn", "ip", "host", and "domain".
+      For example, if "10.1.2.3" resolves to "foo.example.com",
+      fqdn=foo.example.com, ip=10.1.2.3, host=foo and domain=example.com
+    - Jinja expand the "[JINJA TEMPLATE]" part.  This will produce a space-separated list
+      of values, the first is the CN for the cert, the remainder (if any) are SANs.
+    - If no regex matches, the server will respond "error msg=[ERROR MESSAGE]\n" and exit.
+  - Read a line which will be of the form: "keyreq v=1 pubkey=[base64 encoded public key]\n"
+    and then send the response "ok\n" and close the connection.
+  - Generate a new cert:
+    - Use the public key provided by the client during the connection for the certificate
+      key.
+    - Generate a new SSL certificate using best practices.
+    - Fields for the certificate will be configured in the config file.
+    - Expiration time will be configured in the config file.
+    - Sign the certificate using a CA cert and key from the configuration file.
+  - Make a connection back to the DNS name on port 334.
+  - Send a response of the form: "cert v=1 payloadlength=[bytes in certificate stream]\n".
+    followed by the certificate stream data.

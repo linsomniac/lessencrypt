@@ -1,169 +1,222 @@
-#!/usr/bin/env python3
-# requires: cryptography pydantic black mypy
+#!/usr/bin/env python
+"""
+LessEncrypt Client
+
+Handles key generation, server connection, and payload decryption.
+"""
 
 import argparse
 import base64
 import socket
 import sys
+from typing import Optional, Tuple
 from pathlib import Path
-from typing import Optional
-
-from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+DEFAULT_PORT = 334
+DEFAULT_TIMEOUT = 60
+DEFAULT_KEY_SIZE = 4096
 
-def generate_keypair() -> tuple[rsa.RSAPrivateKey, rsa.RSAPublicKey]:
-    """Generate a new RSA private/public key pair."""
+
+def generate_keypair(
+    key_size: int = DEFAULT_KEY_SIZE,
+) -> Tuple[rsa.RSAPrivateKey, rsa.RSAPublicKey]:
+    """Generate an RSA key pair with the specified key size."""
     private_key = rsa.generate_private_key(
         public_exponent=65537,
-        key_size=2048,
+        key_size=key_size,
     )
     public_key = private_key.public_key()
     return private_key, public_key
 
 
-def encode_public_key(public_key: rsa.RSAPublicKey) -> str:
-    """Encode a public key as a base64 string."""
+def public_key_to_base64(public_key: rsa.RSAPublicKey) -> str:
+    """Serialize the public key to base64."""
     pem = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
-    return base64.b64encode(pem).decode("utf-8")
+    return base64.b64encode(pem).decode("ascii")
 
 
-def decrypt_session_key(
-    session_key_b64: str, private_key: rsa.RSAPrivateKey
-) -> bytes:
-    """Decrypt the session key using our private key."""
-    encrypted_session_key = base64.b64decode(session_key_b64)
-    session_key = private_key.decrypt(
-        encrypted_session_key,
-        padding.OAEP(
-            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-            algorithm=hashes.SHA256(),
-            label=None,
-        ),
-    )
-    return session_key
+def start_listener(port: int) -> socket.socket:
+    """Start listening on the specified port."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("0.0.0.0", port))
+    listener.listen(1)
+    return listener
 
 
-def decrypt_payload(payload: bytes, session_key: bytes) -> bytes:
-    """Decrypt the payload using the session key."""
-    # Assuming first 16 bytes are the IV
-    iv = payload[:16]
-    ciphertext = payload[16:]
-    
-    cipher = Cipher(algorithms.AES(session_key), modes.CBC(iv))
-    decryptor = cipher.decryptor()
-    
-    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-    
-    # Remove padding
-    padding_length = plaintext[-1]
-    return plaintext[:-padding_length]
+def connect_to_server(
+    server_address: str, port: int, pubkey_b64: str, timeout: int
+) -> bool:
+    """Connect to the server and send the public key."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect((server_address, port))
+
+            # Send the key request
+            message = f"keyreq v=1 pubkey={pubkey_b64}\n"
+            sock.sendall(message.encode())
+
+            # Wait for server response
+            response = sock.recv(1024).decode().strip()
+
+            if response == "ok":
+                return True
+            elif response.startswith("error msg="):
+                error_msg = response[10:]  # Skip "error msg="
+                print(f"Server error: {error_msg}", file=sys.stderr)
+                return False
+            else:
+                print(f"Unexpected server response: {response}", file=sys.stderr)
+                return False
+    except Exception as e:
+        print(f"Connection error: {e}", file=sys.stderr)
+        return False
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Certificate decryption client")
-    parser.add_argument("server", help="Server to connect to")
-    parser.add_argument("output", help="Output file for the decrypted certificate")
+def wait_for_certificate(
+    listener: socket.socket,
+    timeout: int,
+    private_key: rsa.RSAPrivateKey,
+    output_file: Path,
+) -> bool:
+    """Wait for a certificate from the server and decrypt it."""
+    listener.settimeout(timeout)
+    try:
+        conn, addr = listener.accept()
+        with conn:
+            # Read the certificate header
+            header = conn.recv(1024).decode()
+            if not header.startswith("cert v=1 payloadlength="):
+                print("Invalid certificate header", file=sys.stderr)
+                return False
+
+            # Parse the payload length
+            payload_length_str = header.split("payloadlength=")[1].split("\n")[0]
+            payload_length = int(payload_length_str)
+
+            # Read the payload
+            payload = b""
+            remaining = payload_length
+            while remaining > 0:
+                chunk = conn.recv(min(4096, remaining))
+                if not chunk:
+                    break
+                payload += chunk
+                remaining -= len(chunk)
+
+            if len(payload) != payload_length:
+                print(
+                    f"Incomplete payload: got {len(payload)} bytes, expected {payload_length}",
+                    file=sys.stderr,
+                )
+                return False
+
+            # The first part of the payload is the encrypted session key
+            # The rest is the encrypted certificate
+            # We'll assume the first 512 bytes are the encrypted session key
+            encrypted_session_key = payload[:512]
+            encrypted_payload = payload[512:]
+
+            # Decrypt the session key
+            session_key = private_key.decrypt(
+                encrypted_session_key,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None,
+                ),
+            )
+
+            # Decrypt the payload using the session key
+            # Assume the first 16 bytes of the encrypted payload are the IV
+            iv = encrypted_payload[:16]
+            ciphertext = encrypted_payload[16:]
+
+            cipher = Cipher(algorithms.AES(session_key), modes.CBC(iv))
+            decryptor = cipher.decryptor()  # type: ignore
+            decrypted = decryptor.update(ciphertext) + decryptor.finalize()
+
+            # Remove PKCS#7 padding
+            padding_length = decrypted[-1]
+            decrypted = decrypted[:-padding_length]
+
+            # Write the decrypted payload to the output file
+            output_file.write_bytes(decrypted)
+            return True
+    except socket.timeout:
+        print(
+            f"Timed out waiting for certificate after {timeout} seconds",
+            file=sys.stderr,
+        )
+        return False
+    except Exception as e:
+        print(f"Error receiving certificate: {e}", file=sys.stderr)
+        return False
+
+
+def main() -> int:
+    """Main function for the LessEncrypt client."""
+    parser = argparse.ArgumentParser(description="LessEncrypt Client")
+    parser.add_argument("server_address", help="Address of the LessEncrypt server")
     parser.add_argument(
-        "--timeout", type=int, default=60, help="Timeout for server connection in seconds"
+        "output_file", type=Path, help="File to write the decrypted payload to"
     )
     parser.add_argument(
-        "--port", type=int, default=334, help="Port to use for connections"
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="Port to connect to (default: 334)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help="Timeout in seconds (default: 60)",
+    )
+    parser.add_argument(
+        "--key-size",
+        type=int,
+        default=DEFAULT_KEY_SIZE,
+        help="RSA key size in bits (default: 4096)",
     )
     args = parser.parse_args()
 
-    # Generate keypair
-    private_key, public_key = generate_keypair()
-    pubkey_b64 = encode_public_key(public_key)
+    # Generate RSA key pair
+    print("Generating RSA key pair...")
+    private_key, public_key = generate_keypair(args.key_size)
+    pubkey_b64 = public_key_to_base64(public_key)
 
-    # Start listening on our port
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("0.0.0.0", args.port))
-    listener.listen(1)
-    listener.settimeout(args.timeout)
+    # Start listening for the certificate
+    print(f"Starting listener on port {args.port}...")
+    listener = start_listener(args.port)
 
-    # Connect to server
-    print(f"Connecting to server {args.server}:{args.port}")
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.connect((args.server, args.port))
-    
-    # Send key request
-    key_req = f"keyreq v=1 pubkey={pubkey_b64}\n"
-    server_sock.sendall(key_req.encode())
-    
-    # Wait for "ok" response
-    response = server_sock.recv(1024).decode()
-    if response.strip() != "ok":
-        print(f"Unexpected response from server: {response}")
-        sys.exit(1)
-    
-    print("Server acknowledged our key request")
-    server_sock.close()
-    
-    # Now wait for incoming connection with the encrypted certificate
-    print(f"Waiting for incoming connection on port {args.port}")
     try:
-        client_sock, addr = listener.accept()
-        print(f"Received connection from {addr[0]}:{addr[1]}")
-        
-        # Read the certificate line
-        cert_line = client_sock.recv(4096).decode()
-        
-        # Parse the certificate line
-        if not cert_line.startswith("cert v=1 "):
-            print(f"Invalid certificate line: {cert_line}")
-            sys.exit(1)
-        
-        parts = cert_line.strip().split()
-        session_key_b64 = None
-        payload_length = None
-        
-        for part in parts:
-            if part.startswith("sessionkey="):
-                session_key_b64 = part[len("sessionkey="):]
-            elif part.startswith("payloadlength="):
-                payload_length = int(part[len("payloadlength="):])
-        
-        if session_key_b64 is None or payload_length is None:
-            print(f"Missing required fields in certificate line: {cert_line}")
-            sys.exit(1)
-        
-        # Read the payload
-        payload = b""
-        bytes_received = 0
-        
-        while bytes_received < payload_length:
-            chunk = client_sock.recv(min(4096, payload_length - bytes_received))
-            if not chunk:
-                print(f"Connection closed before receiving all data: got {bytes_received} of {payload_length} bytes")
-                sys.exit(1)
-            payload += chunk
-            bytes_received += len(chunk)
-        
-        client_sock.close()
-        
-        # Decrypt the session key
-        print("Decrypting session key...")
-        session_key = decrypt_session_key(session_key_b64, private_key)
-        
-        # Decrypt the payload
-        print("Decrypting payload...")
-        decrypted_payload = decrypt_payload(payload, session_key)
-        
-        # Write to output file
-        output_path = Path(args.output)
-        output_path.write_bytes(decrypted_payload)
-        print(f"Decrypted payload written to {args.output}")
-        
-    except socket.timeout:
-        print(f"Timeout waiting for connection after {args.timeout} seconds")
-        sys.exit(1)
+        # Connect to the server and send the public key
+        print(f"Connecting to server {args.server_address}:{args.port}...")
+        if not connect_to_server(
+            args.server_address, args.port, pubkey_b64, args.timeout
+        ):
+            return 1
+
+        # Wait for the certificate
+        print("Waiting for certificate...")
+        if not wait_for_certificate(
+            listener, args.timeout, private_key, args.output_file
+        ):
+            return 1
+
+        print(f"Certificate saved to {args.output_file}")
+        return 0
+    finally:
+        listener.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
