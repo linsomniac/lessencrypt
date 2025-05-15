@@ -13,14 +13,18 @@ Handles key generation, server connection, and payload decryption.
 
 import argparse
 import base64
+import datetime
 import os
 import socket
+import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
 # We keep the padding import in case we need to handle v1 protocol in the future
 
 DEFAULT_PORT = 334
@@ -28,13 +32,15 @@ DEFAULT_TIMEOUT = 60
 DEFAULT_KEY_SIZE = 4096
 
 
-def write_file_with_permissions(file_path: Path, data: bytes, contains_private_key: bool = False) -> None:
+def write_file_with_permissions(
+    file_path: Path, data: bytes, contains_private_key: bool = False
+) -> None:
     """
     Write data to a file with appropriate permissions.
-    
+
     If the file contains private key material, it will be written with restricted permissions (umask 077)
     to prevent other users from reading the private key.
-    
+
     Args:
         file_path: Path to write the file to
         data: Binary data to write to the file
@@ -42,20 +48,147 @@ def write_file_with_permissions(file_path: Path, data: bytes, contains_private_k
     """
     # Get the original umask
     old_umask = None
-    
+
     try:
         if contains_private_key:
             # Set a restrictive umask (077) for files with private keys
             # This results in permissions of 600 (user read/write only)
             old_umask = os.umask(0o077)
-            
+
         # Write the file
         file_path.write_bytes(data)
-        
+
     finally:
         # Restore the original umask if we changed it
         if old_umask is not None:
             os.umask(old_umask)
+
+
+def check_certificate_expiry(cert_file_path: Path) -> Optional[int]:
+    """
+    Checks how many days are left until the certificate expires.
+
+    Args:
+        cert_file_path: Path to certificate file
+
+    Returns:
+        Number of days until expiry, or None if the file doesn't exist or is not a valid certificate
+    """
+    if not cert_file_path.exists():
+        return None
+
+    try:
+        # Read the certificate file
+        cert_data = cert_file_path.read_bytes()
+
+        # Find the first certificate in the file (there might be multiple if CA is included)
+        cert_start = cert_data.find(b"-----BEGIN CERTIFICATE-----")
+        if cert_start == -1:
+            print(f"No certificate found in {cert_file_path}", file=sys.stderr)
+            return None
+
+        # Extract certificate data
+        cert_end = (
+            cert_data.find(b"-----END CERTIFICATE-----", cert_start) + 25
+        )  # Include the ending marker
+        if cert_end == -1:
+            print(f"Invalid certificate format in {cert_file_path}", file=sys.stderr)
+            return None
+
+        cert_pem = cert_data[cert_start:cert_end]
+
+        # Parse the certificate
+        cert = x509.load_pem_x509_certificate(cert_pem)
+
+        # Get expiry date
+        expiry_date = cert.not_valid_after
+
+        # Calculate days until expiry
+        now = datetime.datetime.now(expiry_date.tzinfo)
+        days_remaining = (expiry_date - now).days
+
+        return days_remaining
+
+    except Exception as e:
+        print(f"Error checking certificate expiry: {e}", file=sys.stderr)
+        return None
+
+
+def run_post_renew_scripts(post_renew_path: Path) -> int:
+    """
+    Run post-renew scripts after a certificate is issued.
+
+    If post_renew_path is a directory, runs all scripts in the directory in sorted order.
+    If post_renew_path is a file, runs it directly.
+
+    Args:
+        post_renew_path: Path to either a script or a directory containing scripts
+
+    Returns:
+        Exit code from the script(s). 0 for success, non-zero if any script failed.
+    """
+    scripts_to_run: List[Path] = []
+
+    # Check if the path is a directory or a file
+    if post_renew_path.is_dir():
+        # Get all files in the directory
+        print(
+            f"Post-renew directory specified, gathering scripts from {post_renew_path}"
+        )
+        files = list(post_renew_path.iterdir())
+
+        # Filter out non-executable files
+        executable_files = [f for f in files if os.access(f, os.X_OK)]
+        if not executable_files:
+            print(
+                f"Warning: No executable files found in {post_renew_path}",
+                file=sys.stderr,
+            )
+            return 0
+
+        # Sort them
+        scripts_to_run = sorted(executable_files)
+        print(f"Found {len(scripts_to_run)} script(s) to run")
+    else:
+        # Single script
+        if not os.access(post_renew_path, os.X_OK):
+            print(f"Error: {post_renew_path} is not executable", file=sys.stderr)
+            return 1
+
+        scripts_to_run = [post_renew_path]
+
+    # Run each script
+    for script in scripts_to_run:
+        print(f"Running post-renew script: {script}")
+        try:
+            # Run the script and capture its output
+            result = subprocess.run(
+                [str(script)],
+                capture_output=True,
+                text=True,
+                check=False,  # We'll handle errors ourselves
+            )
+
+            # Print the output
+            if result.stdout:
+                print(f"Script output:\n{result.stdout}")
+            if result.stderr:
+                print(f"Script error output:\n{result.stderr}", file=sys.stderr)
+
+            # Check the exit code
+            if result.returncode != 0:
+                print(
+                    f"Script {script} failed with exit code {result.returncode}",
+                    file=sys.stderr,
+                )
+                return result.returncode
+
+        except (subprocess.SubprocessError, OSError) as e:
+            print(f"Error executing script {script}: {e}", file=sys.stderr)
+            return 1
+
+    print(f"All post-renew scripts completed successfully")
+    return 0
 
 
 def generate_keypair(
@@ -101,7 +234,11 @@ def parse_server_address(server_address: str, default_port: int) -> Tuple[str, i
 
 
 def connect_to_server(
-    server_address: str, server_port: int, pubkey_b64: str, timeout: int, listening_port: int
+    server_address: str,
+    server_port: int,
+    pubkey_b64: str,
+    timeout: int,
+    listening_port: int,
 ) -> bool:
     """Connect to the server and send the public key."""
     try:
@@ -144,8 +281,8 @@ def wait_for_certificate(
     ca_file: Optional[Path] = None,
 ) -> bool:
     """
-    Wait for a certificate from the server and decrypt it. 
-    
+    Wait for a certificate from the server and decrypt it.
+
     Saves the private key, client certificate, and CA certificate according to the options:
     - If key_file is None, private key is included in output_file
     - If ca_file is None, CA certificate is included in output_file
@@ -159,20 +296,26 @@ def wait_for_certificate(
             header_data = conn.recv(1024)
             try:
                 # Try to find the newline separator between header and payload
-                newline_pos = header_data.find(b'\n')
+                newline_pos = header_data.find(b"\n")
                 if newline_pos == -1:
                     # If no newline found, assume it's all header
-                    header = header_data.decode('utf-8')
-                    remaining_data = b''
+                    header = header_data.decode("utf-8")
+                    remaining_data = b""
                 else:
                     # Split into header and payload data
-                    header = header_data[:newline_pos+1].decode('utf-8')
-                    remaining_data = header_data[newline_pos+1:]
-                
+                    header = header_data[: newline_pos + 1].decode("utf-8")
+                    remaining_data = header_data[newline_pos + 1 :]
+
                 # Check for both v1 (encrypted) and v2 (unencrypted) protocol versions
                 if header.startswith("cert v=1 payloadlength="):
-                    print("Warning: Server is using deprecated encrypted protocol v1", file=sys.stderr)
-                    print("Please update server to use unencrypted protocol v2", file=sys.stderr)
+                    print(
+                        "Warning: Server is using deprecated encrypted protocol v1",
+                        file=sys.stderr,
+                    )
+                    print(
+                        "Please update server to use unencrypted protocol v2",
+                        file=sys.stderr,
+                    )
                     return False
                 elif header.startswith("cert v=2 payloadlength="):
                     # This is the current protocol version (unencrypted)
@@ -191,7 +334,7 @@ def wait_for_certificate(
             # Read the payload, starting with any data already received
             payload = remaining_data
             remaining = payload_length - len(payload)
-            
+
             # Continue reading until we have the full payload
             while remaining > 0:
                 chunk = conn.recv(min(4096, remaining))
@@ -210,14 +353,17 @@ def wait_for_certificate(
             # In protocol v2, the payload is the certificate directly (no encryption)
             # The payload should contain both client cert and CA cert
             decrypted = payload
-            
+
             # Split the client cert and CA cert if present
             # PEM certificates are delimited by the standard header/footer
             # Look for two certificates in the payload
             cert_parts = decrypted.split(b"-----BEGIN CERTIFICATE-----")
-            
+
             if len(cert_parts) < 2:
-                print("Warning: Payload does not contain multiple certificates. CA cert may be missing.", file=sys.stderr)
+                print(
+                    "Warning: Payload does not contain multiple certificates. CA cert may be missing.",
+                    file=sys.stderr,
+                )
                 client_cert = decrypted
                 ca_cert = None
             else:
@@ -228,30 +374,36 @@ def wait_for_certificate(
                     ca_cert = b"-----BEGIN CERTIFICATE-----" + cert_parts[2]
                 else:
                     ca_cert = None
-            
+
             # Serialize the private key to PEM format
             if passphrase:
                 # Encrypt the private key with the passphrase
-                encryption_algorithm: serialization.KeySerializationEncryption = serialization.BestAvailableEncryption(passphrase.encode())
+                encryption_algorithm: serialization.KeySerializationEncryption = (
+                    serialization.BestAvailableEncryption(passphrase.encode())
+                )
             else:
                 # No encryption
                 encryption_algorithm = serialization.NoEncryption()
-                
+
             private_key_pem = private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=encryption_algorithm
+                encryption_algorithm=encryption_algorithm,
             )
-            
+
             # Handle writing the certificates and key according to options
             if key_file and ca_file and ca_cert:
                 # Write key and CA to separate files, only client cert to output
-                write_file_with_permissions(key_file, private_key_pem, contains_private_key=True)
+                write_file_with_permissions(
+                    key_file, private_key_pem, contains_private_key=True
+                )
                 write_file_with_permissions(ca_file, ca_cert)
                 write_file_with_permissions(output_file, client_cert)
             elif key_file:
                 # Write key to separate file, include CA cert (if available) in output
-                write_file_with_permissions(key_file, private_key_pem, contains_private_key=True)
+                write_file_with_permissions(
+                    key_file, private_key_pem, contains_private_key=True
+                )
                 if ca_cert:
                     write_file_with_permissions(output_file, client_cert + ca_cert)
                 else:
@@ -259,14 +411,26 @@ def wait_for_certificate(
             elif ca_file and ca_cert:
                 # Write CA to separate file, append key to client cert in output
                 write_file_with_permissions(ca_file, ca_cert)
-                write_file_with_permissions(output_file, client_cert + private_key_pem, contains_private_key=True)
+                write_file_with_permissions(
+                    output_file,
+                    client_cert + private_key_pem,
+                    contains_private_key=True,
+                )
             else:
                 # Combine client cert, CA cert (if available), and key in output file
                 if ca_cert:
-                    write_file_with_permissions(output_file, client_cert + ca_cert + private_key_pem, contains_private_key=True)
+                    write_file_with_permissions(
+                        output_file,
+                        client_cert + ca_cert + private_key_pem,
+                        contains_private_key=True,
+                    )
                 else:
-                    write_file_with_permissions(output_file, client_cert + private_key_pem, contains_private_key=True)
-            
+                    write_file_with_permissions(
+                        output_file,
+                        client_cert + private_key_pem,
+                        contains_private_key=True,
+                    )
+
             # Success message already printed by the main function
             return True
     except socket.timeout:
@@ -320,7 +484,41 @@ def main() -> int:
         type=Path,
         help="Write the CA certificate to this file (if specified, CA cert is not included in output file)",
     )
+    parser.add_argument(
+        "--post-renew",
+        type=Path,
+        help="Execute this script or all scripts in this directory after certificate is issued",
+    )
+    parser.add_argument(
+        "--renew-within-days",
+        type=int,
+        help="Only renew certificate if it expires within the specified number of days",
+    )
     args = parser.parse_args()
+
+    # Check if we should only renew when close to expiry
+    if args.renew_within_days is not None:
+        if args.output_file.exists():
+            # Check certificate expiry
+            days_remaining = check_certificate_expiry(args.output_file)
+            if days_remaining is not None:
+                print(
+                    f"Existing certificate has {days_remaining} days remaining until expiry"
+                )
+                if days_remaining > args.renew_within_days:
+                    print(
+                        f"Certificate still valid for more than {args.renew_within_days} days, skipping renewal"
+                    )
+                    print(f"To force renewal, run without the --renew-within-days option")
+                    return 0
+                else:
+                    print(
+                        f"Certificate will expire within {args.renew_within_days} days, proceeding with renewal"
+                    )
+        else:
+            print(
+                f"Certificate file {args.output_file} does not exist, proceeding with initial certificate request"
+            )
 
     # Generate RSA key pair
     print("Generating RSA key pair...")
@@ -336,15 +534,24 @@ def main() -> int:
 
     try:
         # Connect to the server and send the public key from the same port we're listening on
-        print(f"Connecting to server {server_host}:{server_port} from port {args.port}...")
-        if not connect_to_server(server_host, server_port, pubkey_b64, args.timeout, args.port):
+        print(
+            f"Connecting to server {server_host}:{server_port} from port {args.port}..."
+        )
+        if not connect_to_server(
+            server_host, server_port, pubkey_b64, args.timeout, args.port
+        ):
             return 1
 
         # Wait for the certificate
         print("Waiting for certificate...")
         if not wait_for_certificate(
-            listener, args.timeout, private_key, args.output_file, 
-            args.passphrase, args.key_file, args.ca_file
+            listener,
+            args.timeout,
+            private_key,
+            args.output_file,
+            args.passphrase,
+            args.key_file,
+            args.ca_file,
         ):
             return 1
 
@@ -356,20 +563,34 @@ def main() -> int:
         elif args.ca_file:
             print(f"Client certificate with private key saved to {args.output_file}")
         else:
-            print(f"Combined certificate bundle (client cert, CA cert, and private key) saved to {args.output_file}")
-        
+            print(
+                f"Combined certificate bundle (client cert, CA cert, and private key) saved to {args.output_file}"
+            )
+
         # Success message for key file
         if args.key_file:
             if args.passphrase:
                 print(f"Encrypted private key saved to {args.key_file}")
             else:
                 print(f"Private key saved to {args.key_file}")
-            
+
         # Success message for CA file if specified
         if args.ca_file:
             print(f"CA certificate saved to {args.ca_file}")
-            
+
         print("These files can be used directly with web servers like Apache or Nginx.")
+
+        # Run post-renew scripts if specified
+        if args.post_renew:
+            print("\nRunning post-renew scripts...")
+            script_exit_code = run_post_renew_scripts(args.post_renew)
+            if script_exit_code != 0:
+                print(
+                    f"Post-renew script(s) failed with exit code {script_exit_code}",
+                    file=sys.stderr,
+                )
+                return script_exit_code
+
         return 0
     finally:
         listener.close()

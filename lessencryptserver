@@ -60,37 +60,60 @@ class ServerConfig:
 
     def __init__(self, config_file: Path) -> None:
         """Initialize server configuration from a file."""
-        config = configparser.ConfigParser()
-        config.read(config_file)
+        # Check if config file exists before trying to read it
+        if not config_file.exists():
+            error_msg = f"Fatal error: Configuration file {config_file} does not exist"
+            logging.error(error_msg)
+            print(error_msg, file=sys.stderr)
+            sys.exit(1)
+            
+        # Try to read the config file
+        try:
+            config = configparser.ConfigParser()
+            # Use read_file instead of read to get immediate error if file can't be read
+            with open(config_file, 'r') as f:
+                config.read_file(f)
+        except (configparser.Error, IOError) as e:
+            error_msg = f"Fatal error: Could not read configuration file {config_file}: {e}"
+            logging.error(error_msg)
+            print(error_msg, file=sys.stderr)
+            sys.exit(1)
 
-        self.listen_address = config.get("server", "listen_address", fallback="0.0.0.0")
-        self.port = config.getint("server", "port", fallback=DEFAULT_PORT)
-        self.timeout = config.getint("server", "timeout", fallback=DEFAULT_TIMEOUT)
+        try:
+            self.listen_address = config.get("server", "listen_address", fallback="0.0.0.0")
+            self.port = config.getint("server", "port", fallback=DEFAULT_PORT)
+            self.timeout = config.getint("server", "timeout", fallback=DEFAULT_TIMEOUT)
 
-        self.ca_cert_file = Path(config.get("server", "ca_cert_file"))
-        self.ca_key_file = Path(config.get("server", "ca_key_file"))
-        self.ca_key_password = config.get("server", "ca_key_password", fallback=None)
+            # These values are required and have no fallbacks
+            self.ca_cert_file = Path(config.get("server", "ca_cert_file"))
+            self.ca_key_file = Path(config.get("server", "ca_key_file"))
+            self.ca_key_password = config.get("server", "ca_key_password", fallback=None)
 
-        self.cert_country = config.get("certificate", "country", fallback="US")
-        self.cert_state = config.get("certificate", "state", fallback="California")
-        self.cert_locality = config.get(
-            "certificate", "locality", fallback="San Francisco"
-        )
-        self.cert_organization = config.get(
-            "certificate", "organization", fallback="LessEncrypt"
-        )
-        self.cert_validity_days = config.getint(
-            "certificate", "validity_days", fallback=365
-        )
+            self.cert_country = config.get("certificate", "country", fallback="US")
+            self.cert_state = config.get("certificate", "state", fallback="California")
+            self.cert_locality = config.get(
+                "certificate", "locality", fallback="San Francisco"
+            )
+            self.cert_organization = config.get(
+                "certificate", "organization", fallback="LessEncrypt"
+            )
+            self.cert_validity_days = config.getint(
+                "certificate", "validity_days", fallback=365
+            )
 
-        self.name_mapping_file = Path(
-            config.get("server", "mappings", fallback=DEFAULT_MAPPING_FILE)
-        )
+            self.name_mapping_file = Path(
+                config.get("server", "mappings", fallback=DEFAULT_MAPPING_FILE)
+            )
 
-        # Security settings
-        self.allow_high_ports = config.getboolean(
-            "server", "allow_high_ports", fallback=False
-        )
+            # Security settings
+            self.allow_high_ports = config.getboolean(
+                "server", "allow_high_ports", fallback=False
+            )
+        except (configparser.NoSectionError, configparser.NoOptionError) as e:
+            error_msg = f"Fatal error: Missing required configuration in {config_file}: {e}"
+            logging.error(error_msg)
+            print(error_msg, file=sys.stderr)
+            sys.exit(1)
 
 
 def load_ca_cert_and_key(
@@ -492,27 +515,25 @@ def handle_client(
             )
             return
             
-        # Create a copy of the config for this request
+        # Create a new config for this request based on the existing one
         # This allows per-request configuration overrides without affecting other requests
-        request_config = ServerConfig(config.ca_cert_file.parent / "lessencrypt.cfg")
+        # We'll do a deep copy by transferring all values without reading the config file again
+        request_config = ServerConfig.__new__(ServerConfig)
         
-        # Copy over all original config values explicitly
-        # Server section
+        # Manually copy all attributes from original config
         request_config.listen_address = config.listen_address
         request_config.port = config.port
         request_config.timeout = config.timeout
         request_config.ca_cert_file = config.ca_cert_file
         request_config.ca_key_file = config.ca_key_file
         request_config.ca_key_password = config.ca_key_password
-        request_config.name_mapping_file = config.name_mapping_file
-        request_config.allow_high_ports = config.allow_high_ports
-        
-        # Certificate section
         request_config.cert_country = config.cert_country
         request_config.cert_state = config.cert_state
-        request_config.cert_locality = config.cert_locality 
+        request_config.cert_locality = config.cert_locality
         request_config.cert_organization = config.cert_organization
         request_config.cert_validity_days = config.cert_validity_days
+        request_config.name_mapping_file = config.name_mapping_file
+        request_config.allow_high_ports = config.allow_high_ports
         
         # Apply any configuration overrides from the mapping
         if match_overrides:
