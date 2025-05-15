@@ -369,12 +369,33 @@ def handle_client(
         raw_data = client_socket.recv(8192)
         try:
             data = raw_data.decode("utf-8")
-            if not data.startswith("keyreq v=1 pubkey="):
+            if not data.startswith("keyreq v=1"):
+                logging.debug(f"Client sent data: {data}")
                 logging.warning("Invalid key request format")
                 client_socket.sendall(b"error msg=Invalid key request format\n")
                 return
 
+            # Check for port parameter - this is where the client wants us to connect back to
+            client_specified_port = (
+                client_port  # Default to the source port if not specified
+            )
+            if "port=" in data:
+                try:
+                    port_part = data.split("port=")[1].split()[0]  # Get the port number
+                    client_specified_port = int(port_part)
+                    logging.debug(
+                        f"Client requested connection back on port {client_specified_port}"
+                    )
+                except (ValueError, IndexError) as e:
+                    logging.warning(f"Invalid port in key request: {e}")
+                    # Continue with the default port (source port)
+
             # Extract the public key
+            if "pubkey=" not in data:
+                logging.warning("No public key in request")
+                client_socket.sendall(b"error msg=Missing public key in request\n")
+                return
+
             pubkey_b64 = data.split("pubkey=")[1].strip()
             logging.debug("Received public key (base64 encoded)")
         except UnicodeDecodeError:
@@ -421,23 +442,27 @@ def handle_client(
         logging.debug(f"Encrypted payload size: {len(encrypted_payload)} bytes")
 
         # Check if client port is allowed
-        if client_port >= 1024 and not config.allow_high_ports:
+        if client_specified_port >= 1024 and not config.allow_high_ports:
             logging.warning(
-                f"Refusing to connect back to high port {client_port} (allow_high_ports=false)"
+                f"Refusing to connect back to high port {client_specified_port} (allow_high_ports=false)"
             )
             raise ValueError(
-                f"Security policy prohibits connection to high ports (>= 1024): {client_port}"
+                f"Security policy prohibits connection to high ports (>= 1024): {client_specified_port}"
             )
 
-        # Connect back to the client using the same port they connected from
-        logging.info(f"Connecting back to client at {hostname}:{client_port}")
+        # Connect back to the client on the requested port
+        logging.info(f"Connecting back to client at {hostname}:{client_specified_port}")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(config.timeout)
             try:
-                sock.connect((hostname, client_port))
-                logging.debug(f"Successfully connected to {hostname}:{client_port}")
+                sock.connect((hostname, client_specified_port))
+                logging.debug(
+                    f"Successfully connected to {hostname}:{client_specified_port}"
+                )
             except Exception as e:
-                logging.error(f"Failed to connect to {hostname}:{client_port}: {e}")
+                logging.error(
+                    f"Failed to connect to {hostname}:{client_specified_port}: {e}"
+                )
                 raise
 
             # Send the certificate

@@ -70,16 +70,20 @@ def parse_server_address(server_address: str, default_port: int) -> Tuple[str, i
 
 
 def connect_to_server(
-    server_address: str, port: int, pubkey_b64: str, timeout: int
+    server_address: str, server_port: int, pubkey_b64: str, timeout: int, listening_port: int
 ) -> bool:
     """Connect to the server and send the public key."""
     try:
+        # We're already listening on the specified port, so we can't bind to it directly.
+        # Instead, we'll create a regular socket and let the OS assign a source port.
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
-            sock.connect((server_address, port))
+            # We'll include the port we're listening on in the key request
+            # so the server knows where to connect back to
+            sock.connect((server_address, server_port))
 
-            # Send the key request
-            message = f"keyreq v=1 pubkey={pubkey_b64}\n"
+            # Send the key request with our listening port
+            message = f"keyreq v=1 port={listening_port} pubkey={pubkey_b64}\n"
             sock.sendall(message.encode())
 
             # Wait for server response
@@ -268,9 +272,9 @@ def main() -> int:
     listener = start_listener(args.port)
 
     try:
-        # Connect to the server and send the public key
-        print(f"Connecting to server {server_host}:{server_port}...")
-        if not connect_to_server(server_host, server_port, pubkey_b64, args.timeout):
+        # Connect to the server and send the public key from the same port we're listening on
+        print(f"Connecting to server {server_host}:{server_port} from port {args.port}...")
+        if not connect_to_server(server_host, server_port, pubkey_b64, args.timeout, args.port):
             return 1
 
         # Wait for the certificate
