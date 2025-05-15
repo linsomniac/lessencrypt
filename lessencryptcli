@@ -13,10 +13,11 @@ Handles key generation, server connection, and payload decryption.
 
 import argparse
 import base64
+import os
 import socket
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
@@ -25,6 +26,36 @@ from cryptography.hazmat.primitives.asymmetric import rsa, padding
 DEFAULT_PORT = 334
 DEFAULT_TIMEOUT = 60
 DEFAULT_KEY_SIZE = 4096
+
+
+def write_file_with_permissions(file_path: Path, data: bytes, contains_private_key: bool = False) -> None:
+    """
+    Write data to a file with appropriate permissions.
+    
+    If the file contains private key material, it will be written with restricted permissions (umask 077)
+    to prevent other users from reading the private key.
+    
+    Args:
+        file_path: Path to write the file to
+        data: Binary data to write to the file
+        contains_private_key: Whether the file contains private key material
+    """
+    # Get the original umask
+    old_umask = None
+    
+    try:
+        if contains_private_key:
+            # Set a restrictive umask (077) for files with private keys
+            # This results in permissions of 600 (user read/write only)
+            old_umask = os.umask(0o077)
+            
+        # Write the file
+        file_path.write_bytes(data)
+        
+    finally:
+        # Restore the original umask if we changed it
+        if old_umask is not None:
+            os.umask(old_umask)
 
 
 def generate_keypair(
@@ -212,24 +243,29 @@ def wait_for_certificate(
                 encryption_algorithm=encryption_algorithm
             )
             
-            # Determine where to write the key file
-            key_file_path = key_file if key_file else output_file.with_suffix(".key")
-            
-            # Write the private key
-            key_file_path.write_bytes(private_key_pem)
-            
-            # Handle writing the certificates according to options
-            if ca_file and ca_cert:
-                # Write CA cert to separate file
-                ca_file.write_bytes(ca_cert)
-                # Write only client cert to output file
-                output_file.write_bytes(client_cert)
-            elif ca_cert:
-                # Combine client and CA certs in output file
-                output_file.write_bytes(client_cert + ca_cert)
+            # Handle writing the certificates and key according to options
+            if key_file and ca_file and ca_cert:
+                # Write key and CA to separate files, only client cert to output
+                write_file_with_permissions(key_file, private_key_pem, contains_private_key=True)
+                write_file_with_permissions(ca_file, ca_cert)
+                write_file_with_permissions(output_file, client_cert)
+            elif key_file:
+                # Write key to separate file, include CA cert (if available) in output
+                write_file_with_permissions(key_file, private_key_pem, contains_private_key=True)
+                if ca_cert:
+                    write_file_with_permissions(output_file, client_cert + ca_cert)
+                else:
+                    write_file_with_permissions(output_file, client_cert)
+            elif ca_file and ca_cert:
+                # Write CA to separate file, append key to client cert in output
+                write_file_with_permissions(ca_file, ca_cert)
+                write_file_with_permissions(output_file, client_cert + private_key_pem, contains_private_key=True)
             else:
-                # Only client cert available
-                output_file.write_bytes(client_cert)
+                # Combine client cert, CA cert (if available), and key in output file
+                if ca_cert:
+                    write_file_with_permissions(output_file, client_cert + ca_cert + private_key_pem, contains_private_key=True)
+                else:
+                    write_file_with_permissions(output_file, client_cert + private_key_pem, contains_private_key=True)
             
             # Success message already printed by the main function
             return True
@@ -312,31 +348,28 @@ def main() -> int:
         ):
             return 1
 
-        print(f"Certificate saved to {args.output_file}")
+        # Success message for output file
+        if args.key_file and args.ca_file:
+            print(f"Client certificate saved to {args.output_file}")
+        elif args.key_file:
+            print(f"Client certificate with CA certificate saved to {args.output_file}")
+        elif args.ca_file:
+            print(f"Client certificate with private key saved to {args.output_file}")
+        else:
+            print(f"Combined certificate bundle (client cert, CA cert, and private key) saved to {args.output_file}")
         
         # Success message for key file
-        key_file_path = args.key_file if args.key_file else args.output_file.with_suffix('.key')
-        if args.passphrase:
-            print(f"Encrypted private key saved to {key_file_path}")
-        else:
-            print(f"Private key saved to {key_file_path}")
+        if args.key_file:
+            if args.passphrase:
+                print(f"Encrypted private key saved to {args.key_file}")
+            else:
+                print(f"Private key saved to {args.key_file}")
             
         # Success message for CA file if specified
         if args.ca_file:
             print(f"CA certificate saved to {args.ca_file}")
             
-        # Determine which files are included in output file
-        if args.ca_file and args.key_file:
-            print("Client certificate saved to output file")
-            print(f"All files can be used directly with web servers like Apache or Nginx.")
-        elif args.ca_file:
-            print("Client certificate saved to output file (CA in separate file)")
-            print(f"These files can be used directly with web servers like Apache or Nginx.")
-        elif args.key_file:
-            print("Client and CA certificates saved to output file")
-            print(f"These files can be used directly with web servers like Apache or Nginx.")
-        else:
-            print("Client certificate, CA certificate, and private key files can be used directly with web servers like Apache or Nginx.")
+        print("These files can be used directly with web servers like Apache or Nginx.")
         return 0
     finally:
         listener.close()
