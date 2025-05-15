@@ -1,0 +1,18 @@
+This is a Python program with a client and a server component.  Both programs should
+use the "uv script" mechanism for a "#!" line and to specify requirements, and use
+black formatting, type annotations, and type checking with mypy.
+
+The client needs to:
+  Generate a public/private keypair.
+  Start listening on port 334/tcp (it does not need to process data from 334 until after
+      the next step so this does not need to be threaded).
+  Connect to a specified server on port 334/tcp and send the message "keyreq v=1
+      pubkey=[base64 encoded public key]\n" and then wait for the response "ok\n".
+  Wait for a connection on port 334/tcp for up to a configured timeout.
+      Read a line from the client which should be of the form: "cert v=1 sessionkey=[base64
+      encoded encryption session key, an AES 256 key encrypted with the public key we sent]
+      payloadlength=[bytes in certificate stream]\n".
+  It then should read the specified number of bytes from the socket, and close the socket.
+  It should then decrypt the session key using the private key generated above.
+  Then use the session key to decrypt the payload.
+  Then write the decrypted payload to a file which is given on the command-line.
