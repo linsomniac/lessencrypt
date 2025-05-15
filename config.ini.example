@@ -1,0 +1,29 @@
+[server]
+# IP address to listen on, default is all interfaces
+listen_address = 0.0.0.0
+# Port to listen on
+port = 334
+# Timeout in seconds for connections
+timeout = 60
+
+[ca]
+# Path to the CA certificate file (PEM format)
+cert_file = /etc/lessencrypt/ca.crt
+# Path to the CA private key file (PEM format)
+key_file = /etc/lessencrypt/ca.key
+# Password for the CA private key (if encrypted)
+# Leave commented out if the key is not encrypted
+# key_password = your-secure-password
+
+[certificate]
+# Certificate subject information
+country = US
+state = California
+locality = San Francisco
+organization = LessEncrypt
+# Validity period in days
+validity_days = 365
+
+[mapping]
+# Path to the name mapping file
+file = /etc/lessencrypt/name_mapping.conf

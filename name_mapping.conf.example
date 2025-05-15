@@ -1,0 +1,27 @@
+# LessEncrypt name mapping configuration
+#
+# Format: /regex/ template
+#
+# Each line consists of a regular expression enclosed in slashes,
+# followed by a Jinja2 template string.
+# 
+# Available variables in templates:
+# - fqdn: The full DNS hostname
+# - host: The hostname part (before first dot)
+# - domain: The domain part (after first dot)
+#
+# Templates should output a space-separated list of names.
+# The first name will be used as the certificate's CN (Common Name),
+# and any additional names will be added as Subject Alternative Names (SANs).
+
+# Match all hosts in example.com domain
+/^.*\.example\.com$/ {{ fqdn }} *.{{ domain }}
+
+# Match specific host
+/^web01\.internal\.org$/ {{ fqdn }} web.internal.org
+
+# Match all development servers
+/^dev-.*\.internal\.org$/ {{ fqdn }} *.dev.internal.org
+
+# Generic wildcard for all unmatched hosts 
+/.*/ {{ fqdn }}
