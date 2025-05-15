@@ -113,10 +113,17 @@ def load_ca_cert_and_key(
     return ca_cert, ca_key
 
 
-def parse_name_mapping(mapping_file: Path) -> List[Tuple[Pattern[str], str]]:
-    """Parse the name mapping file."""
+def parse_name_mapping(mapping_file: Path) -> Tuple[List[Tuple[Pattern[str], str, Dict[str, str]]], Dict[str, str]]:
+    """Parse the name mapping file.
+    
+    Returns:
+        A tuple containing:
+        - A list of tuples with (regex_pattern, template_str, config_overrides)
+        - A dictionary of global config overrides (applied to all matches)
+    """
     logging.info(f"Parsing name mapping file: {mapping_file}")
     mappings = []
+    global_overrides = {}  # Global overrides that apply to all entries
     line_number = 0
 
     with open(mapping_file, "r") as f:
@@ -130,24 +137,66 @@ def parse_name_mapping(mapping_file: Path) -> List[Tuple[Pattern[str], str]]:
             # Extract the regex and template parts
             match = re.match(r"^/(.*)/\s+(.*)$", line)
             if not match:
-                logging.warning(f"Line {line_number}: Invalid mapping format: {line}")
-                print(f"Invalid mapping line: {line}", file=sys.stderr)
+                # Check if it's a global override (not tied to a pattern)
+                if line.startswith("set:"):
+                    try:
+                        _, config_setting = line.split("set:", 1)
+                        if "=" in config_setting:
+                            config_key, config_value = config_setting.split("=", 1)
+                            global_overrides[config_key.strip()] = config_value.strip()
+                            logging.debug(f"Line {line_number}: Added global config override '{config_key}={config_value}'")
+                        else:
+                            logging.warning(f"Line {line_number}: Invalid global config setting format: {line}")
+                            print(f"Invalid global config setting format: {line}", file=sys.stderr)
+                    except ValueError:
+                        logging.warning(f"Line {line_number}: Invalid setting format: {line}")
+                        print(f"Invalid setting format: {line}", file=sys.stderr)
+                else:
+                    logging.warning(f"Line {line_number}: Invalid mapping format: {line}")
+                    print(f"Invalid mapping line: {line}", file=sys.stderr)
                 continue
 
-            regex_str, template_str = match.groups()
+            regex_str, template_part = match.groups()
+            
+            # Extract any set: directives from the template part
+            template_words = template_part.split()
+            template_str_parts = []
+            config_overrides = {}
+            
+            for word in template_words:
+                if word.startswith("set:"):
+                    try:
+                        _, config_setting = word.split("set:", 1)
+                        if "=" in config_setting:
+                            config_key, config_value = config_setting.split("=", 1)
+                            config_overrides[config_key.strip()] = config_value.strip()
+                            logging.debug(f"Line {line_number}: Added config override '{config_key}={config_value}'")
+                        else:
+                            logging.warning(f"Line {line_number}: Invalid config setting format: {word}")
+                            template_str_parts.append(word)  # Keep it as is if format is invalid
+                    except ValueError:
+                        logging.warning(f"Line {line_number}: Invalid setting format: {word}")
+                        template_str_parts.append(word)  # Keep it as is if format is invalid
+                else:
+                    template_str_parts.append(word)
+            
+            # Reconstruct the template string without set: directives
+            template_str = " ".join(template_str_parts)
+            
             logging.debug(
-                f"Line {line_number}: Extracted regex='{regex_str}', template='{template_str}'"
+                f"Line {line_number}: Extracted regex='{regex_str}', template='{template_str}', overrides={config_overrides}"
             )
             try:
                 regex = re.compile(regex_str)
-                mappings.append((regex, template_str))
+                mappings.append((regex, template_str, config_overrides))
                 logging.debug(f"Line {line_number}: Successfully compiled regex")
             except re.error as e:
                 logging.warning(f"Line {line_number}: Invalid regex '{regex_str}': {e}")
                 print(f"Invalid regex in mapping: {regex_str} - {e}", file=sys.stderr)
 
     logging.info(f"Loaded {len(mappings)} name mappings from {mapping_file}")
-    return mappings
+    logging.info(f"Loaded {len(global_overrides)} global config overrides from {mapping_file}")
+    return mappings, global_overrides
 
 
 def lookup_reverse_dns(ip_address: str) -> Optional[str]:
@@ -166,10 +215,99 @@ def lookup_reverse_dns(ip_address: str) -> Optional[str]:
         return None
 
 
+def apply_config_overrides(config: ServerConfig, overrides: Dict[str, str]) -> None:
+    """Apply configuration overrides from mapping file set: directives.
+    
+    Supports overriding:
+    - Server section: ca_cert_file, ca_key_file, ca_key_password
+    - Certificate section: All values (country, state, locality, organization, validity_days)
+    
+    Format for keys:
+    - Simple key: Applied to its default section (e.g., "ca_cert_file" for server section)
+    - Section.key: Applied to specific section (e.g., "certificate.validity_days")
+    """
+    # Define which settings are allowed to be overridden
+    allowed_server_settings = {"ca_cert_file", "ca_key_file", "ca_key_password"}
+    allowed_cert_settings = {
+        "country", "state", "locality", "organization", "validity_days"
+    }
+    
+    for key, value in overrides.items():
+        # Check if the key includes a section prefix
+        if "." in key:
+            section, setting = key.split(".", 1)
+            
+            if section == "server" and setting in allowed_server_settings:
+                logging.debug(f"Applying server config override: {setting}={value}")
+                
+                if setting == "ca_cert_file":
+                    config.ca_cert_file = Path(value)
+                elif setting == "ca_key_file":
+                    config.ca_key_file = Path(value)
+                elif setting == "ca_key_password":
+                    # Empty password means no password
+                    config.ca_key_password = value if value else None
+            
+            elif section == "certificate" and setting in allowed_cert_settings:
+                logging.debug(f"Applying certificate config override: {setting}={value}")
+                
+                if setting == "country":
+                    config.cert_country = value
+                elif setting == "state":
+                    config.cert_state = value
+                elif setting == "locality":
+                    config.cert_locality = value
+                elif setting == "organization":
+                    config.cert_organization = value
+                elif setting == "validity_days":
+                    try:
+                        config.cert_validity_days = int(value)
+                    except ValueError:
+                        logging.warning(f"Invalid value for validity_days: {value}, must be an integer")
+        
+        # Handle keys without section prefix - assume appropriate section
+        else:
+            if key in allowed_server_settings:
+                logging.debug(f"Applying server config override: {key}={value}")
+                
+                if key == "ca_cert_file":
+                    config.ca_cert_file = Path(value)
+                elif key == "ca_key_file":
+                    config.ca_key_file = Path(value)
+                elif key == "ca_key_password":
+                    config.ca_key_password = value if value else None
+            
+            elif key in allowed_cert_settings:
+                logging.debug(f"Applying certificate config override: {key}={value}")
+                
+                if key == "country":
+                    config.cert_country = value
+                elif key == "state":
+                    config.cert_state = value
+                elif key == "locality":
+                    config.cert_locality = value
+                elif key == "organization":
+                    config.cert_organization = value
+                elif key == "validity_days":
+                    try:
+                        config.cert_validity_days = int(value)
+                    except ValueError:
+                        logging.warning(f"Invalid value for validity_days: {value}, must be an integer")
+            
+            else:
+                logging.warning(f"Unknown config override setting: {key}")
+
+
 def match_hostname(
-    hostname: str, mappings: List[Tuple[Pattern[str], str]]
-) -> Optional[List[str]]:
-    """Match a hostname against the name mappings."""
+    hostname: str, mappings: List[Tuple[Pattern[str], str, Dict[str, str]]]
+) -> Tuple[Optional[List[str]], Dict[str, str]]:
+    """Match a hostname against the name mappings.
+    
+    Returns:
+        A tuple of (cert_names, config_overrides) where:
+        - cert_names: List of certificate names (common name and SANs) or None if no match
+        - config_overrides: Dict of configuration overrides from the matched mapping
+    """
     logging.debug(f"Matching hostname: {hostname}")
 
     # Parse hostname into components
@@ -191,7 +329,7 @@ def match_hostname(
     }
 
     # Try to match the hostname against the mappings
-    for i, (regex, template_str) in enumerate(mappings):
+    for i, (regex, template_str, config_overrides) in enumerate(mappings):
         logging.debug(f"Trying mapping #{i+1}: /{regex.pattern}/")
         if regex.search(hostname):
             logging.debug(f"Matched regex: /{regex.pattern}/")
@@ -203,10 +341,10 @@ def match_hostname(
             logging.info(
                 f"Hostname {hostname} matched to CN={cert_names[0]} and SANs={cert_names[1:] if len(cert_names) > 1 else []}"
             )
-            return cert_names
+            return cert_names, config_overrides
 
     logging.debug(f"No mapping matched hostname: {hostname}")
-    return None
+    return None, {}
 
 
 # Session key generation removed - no longer needed as we send unencrypted payload
@@ -249,7 +387,7 @@ def generate_certificate(
     builder = builder.serial_number(generate_random_hex_serial())
 
     # Set validity period
-    now = datetime.datetime.now(datetime.UTC)
+    now = datetime.datetime.now(datetime.timezone.utc)
     builder = builder.not_valid_before(now)
     builder = builder.not_valid_after(
         now + datetime.timedelta(days=config.cert_validity_days)
@@ -326,7 +464,7 @@ def handle_client(
     config: ServerConfig,
     ca_cert: x509.Certificate,
     ca_key: rsa.RSAPrivateKey,
-    mappings: List[Tuple[Pattern[str], str]],
+    mappings: List[Tuple[Pattern[str], str, Dict[str, str]]],
 ) -> None:
     """Handle a client connection."""
     client_ip = client_address[0]
@@ -346,18 +484,61 @@ def handle_client(
 
         # Match hostname against mappings
         logging.debug(f"Matching hostname {hostname} against name mappings")
-        cert_names = match_hostname(hostname, mappings)
+        cert_names, match_overrides = match_hostname(hostname, mappings)
         if not cert_names:
             logging.warning(f"No mapping found for hostname {hostname}")
             client_socket.sendall(
                 f"error msg=No mapping found for {hostname}\n".encode()
             )
             return
+            
+        # Create a copy of the config for this request
+        # This allows per-request configuration overrides without affecting other requests
+        request_config = ServerConfig(config.ca_cert_file.parent / "lessencrypt.cfg")
+        
+        # Copy over all original config values explicitly
+        # Server section
+        request_config.listen_address = config.listen_address
+        request_config.port = config.port
+        request_config.timeout = config.timeout
+        request_config.ca_cert_file = config.ca_cert_file
+        request_config.ca_key_file = config.ca_key_file
+        request_config.ca_key_password = config.ca_key_password
+        request_config.name_mapping_file = config.name_mapping_file
+        request_config.allow_high_ports = config.allow_high_ports
+        
+        # Certificate section
+        request_config.cert_country = config.cert_country
+        request_config.cert_state = config.cert_state
+        request_config.cert_locality = config.cert_locality 
+        request_config.cert_organization = config.cert_organization
+        request_config.cert_validity_days = config.cert_validity_days
+        
+        # Apply any configuration overrides from the mapping
+        if match_overrides:
+            logging.info(f"Applying {len(match_overrides)} mapping-specific configuration overrides")
+            apply_config_overrides(request_config, match_overrides)
+            
+            # If CA config was changed, reload the CA cert and key
+            if any(k in match_overrides or f"server.{k}" in match_overrides 
+                  for k in ["ca_cert_file", "ca_key_file", "ca_key_password"]):
+                logging.info(f"CA configuration changed, reloading CA cert and key")
+                logging.debug(f"Using CA cert: {request_config.ca_cert_file}")
+                logging.debug(f"Using CA key: {request_config.ca_key_file}")
+                ca_cert, ca_key = load_ca_cert_and_key(request_config)
+                logging.debug(f"Reloaded CA certificate subject: {ca_cert.subject}")
 
         common_name = cert_names[0]
         sans = cert_names[1:]
         logging.info(f"Using common name {common_name} for certificate")
         logging.debug(f"Using SANs: {sans}")
+        
+        # Log certificate configuration that will be used
+        logging.debug(f"Certificate will use: country={request_config.cert_country}, " +
+                     f"state={request_config.cert_state}, " +
+                     f"locality={request_config.cert_locality}, " +
+                     f"organization={request_config.cert_organization}, " +
+                     f"validity_days={request_config.cert_validity_days}")
 
         # Read the key request
         logging.debug("Waiting for key request from client")
@@ -417,7 +598,7 @@ def handle_client(
         # Generate a certificate
         logging.info("Generating certificate")
         certificate = generate_certificate(
-            pubkey_pem, common_name, sans, ca_cert, ca_key, config
+            pubkey_pem, common_name, sans, ca_cert, ca_key, request_config
         )
         logging.debug(
             f"Certificate generated with serial number {certificate.serial_number} (hex: {certificate.serial_number:x})"
@@ -545,10 +726,15 @@ def main() -> int:
         ca_cert, ca_key = load_ca_cert_and_key(config)
         logging.debug(f"CA certificate subject: {ca_cert.subject}")
 
-        # Parse name mappings
+        # Parse name mappings and global overrides
         logging.info(f"Loading name mappings from {config.name_mapping_file}")
-        mappings = parse_name_mapping(config.name_mapping_file)
+        mappings, global_overrides = parse_name_mapping(config.name_mapping_file)
         logging.debug(f"Loaded {len(mappings)} name mappings")
+        
+        # Apply global configuration overrides
+        if global_overrides:
+            logging.info(f"Applying {len(global_overrides)} global configuration overrides")
+            apply_config_overrides(config, global_overrides)
 
         # Create the server socket
         logging.info("Creating server socket")

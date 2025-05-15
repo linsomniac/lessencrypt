@@ -14,14 +14,14 @@
 # The first name will be used as the certificate's CN (Common Name),
 # and any additional names will be added as Subject Alternative Names (SANs).
 
-# Match all hosts in example.com domain
-/^.*\.example\.com$/ {{ fqdn }} *.{{ domain }}
+# Match all hosts in example.com domain, use it's name as the CN
+/^.*\.example\.com$/ {{ fqdn }}
 
-# Match specific host
+# Match specific host, add an SAN
 /^web01\.internal\.org$/ {{ fqdn }} web.internal.org
 
-# Match all development servers
-/^dev-.*\.internal\.org$/ {{ fqdn }} *.dev.internal.org
+# Match all development servers, add a wildcard SAN and set validity days
+/^dev-.*\.internal\.org$/ {{ fqdn }} *.dev.internal.org set:validity_days=36
 
 # Generic wildcard for all unmatched hosts 
 /.*/ {{ fqdn }}
