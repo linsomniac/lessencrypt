@@ -17,6 +17,7 @@ import argparse
 import base64
 import configparser
 import datetime
+import hashlib
 import logging
 import os
 import random
@@ -43,6 +44,30 @@ DEFAULT_CONFIG_FILE = "/etc/lessencrypt/lessencrypt.cfg"
 DEFAULT_MAPPING_FILE = "/etc/lessencrypt/name_mapping.conf"
 
 
+def parse_protocol_message(message: str) -> Dict[str, str]:
+    """Parse a protocol message into key-value pairs.
+
+    Args:
+        message: Protocol message string (e.g., "keyreq v=1 port=334 pubkey=ABC123")
+
+    Returns:
+        Dictionary of key-value pairs from the message
+    """
+    parts = message.strip().split()
+    result = {}
+
+    for part in parts:
+        if "=" in part:
+            key, value = part.split("=", 1)
+            result[key] = value
+        else:
+            # For parts without =, use the part itself as both key and value
+            # This handles cases like "keyreq" or "lessencrypt"
+            result[part] = part
+
+    return result
+
+
 def generate_random_hex_serial() -> int:
     """Generate a random serial number as 16 lowercase hex digits.
 
@@ -66,28 +91,34 @@ class ServerConfig:
             logging.error(error_msg)
             print(error_msg, file=sys.stderr)
             sys.exit(1)
-            
+
         # Try to read the config file
         try:
             config = configparser.ConfigParser()
             # Use read_file instead of read to get immediate error if file can't be read
-            with open(config_file, 'r') as f:
+            with open(config_file, "r") as f:
                 config.read_file(f)
         except (configparser.Error, IOError) as e:
-            error_msg = f"Fatal error: Could not read configuration file {config_file}: {e}"
+            error_msg = (
+                f"Fatal error: Could not read configuration file {config_file}: {e}"
+            )
             logging.error(error_msg)
             print(error_msg, file=sys.stderr)
             sys.exit(1)
 
         try:
-            self.listen_address = config.get("server", "listen_address", fallback="0.0.0.0")
+            self.listen_address = config.get(
+                "server", "listen_address", fallback="0.0.0.0"
+            )
             self.port = config.getint("server", "port", fallback=DEFAULT_PORT)
             self.timeout = config.getint("server", "timeout", fallback=DEFAULT_TIMEOUT)
 
             # These values are required and have no fallbacks
             self.ca_cert_file = Path(config.get("server", "ca_cert_file"))
             self.ca_key_file = Path(config.get("server", "ca_key_file"))
-            self.ca_key_password = config.get("server", "ca_key_password", fallback=None)
+            self.ca_key_password = config.get(
+                "server", "ca_key_password", fallback=None
+            )
 
             self.cert_country = config.get("certificate", "country", fallback="US")
             self.cert_state = config.get("certificate", "state", fallback="California")
@@ -109,8 +140,13 @@ class ServerConfig:
             self.allow_high_ports = config.getboolean(
                 "server", "allow_high_ports", fallback=False
             )
+
+            # Authentication settings
+            self.shared_secret = config.get("server", "shared_secret", fallback=None)
         except (configparser.NoSectionError, configparser.NoOptionError) as e:
-            error_msg = f"Fatal error: Missing required configuration in {config_file}: {e}"
+            error_msg = (
+                f"Fatal error: Missing required configuration in {config_file}: {e}"
+            )
             logging.error(error_msg)
             print(error_msg, file=sys.stderr)
             sys.exit(1)
@@ -136,9 +172,11 @@ def load_ca_cert_and_key(
     return ca_cert, ca_key
 
 
-def parse_name_mapping(mapping_file: Path) -> Tuple[List[Tuple[Pattern[str], str, Dict[str, str]]], Dict[str, str]]:
+def parse_name_mapping(
+    mapping_file: Path,
+) -> Tuple[List[Tuple[Pattern[str], str, Dict[str, str]]], Dict[str, str]]:
     """Parse the name mapping file.
-    
+
     Returns:
         A tuple containing:
         - A list of tuples with (regex_pattern, template_str, config_overrides)
@@ -167,25 +205,36 @@ def parse_name_mapping(mapping_file: Path) -> Tuple[List[Tuple[Pattern[str], str
                         if "=" in config_setting:
                             config_key, config_value = config_setting.split("=", 1)
                             global_overrides[config_key.strip()] = config_value.strip()
-                            logging.debug(f"Line {line_number}: Added global config override '{config_key}={config_value}'")
+                            logging.debug(
+                                f"Line {line_number}: Added global config override '{config_key}={config_value}'"
+                            )
                         else:
-                            logging.warning(f"Line {line_number}: Invalid global config setting format: {line}")
-                            print(f"Invalid global config setting format: {line}", file=sys.stderr)
+                            logging.warning(
+                                f"Line {line_number}: Invalid global config setting format: {line}"
+                            )
+                            print(
+                                f"Invalid global config setting format: {line}",
+                                file=sys.stderr,
+                            )
                     except ValueError:
-                        logging.warning(f"Line {line_number}: Invalid setting format: {line}")
+                        logging.warning(
+                            f"Line {line_number}: Invalid setting format: {line}"
+                        )
                         print(f"Invalid setting format: {line}", file=sys.stderr)
                 else:
-                    logging.warning(f"Line {line_number}: Invalid mapping format: {line}")
+                    logging.warning(
+                        f"Line {line_number}: Invalid mapping format: {line}"
+                    )
                     print(f"Invalid mapping line: {line}", file=sys.stderr)
                 continue
 
             regex_str, template_part = match.groups()
-            
+
             # Extract any set: directives from the template part
             template_words = template_part.split()
             template_str_parts = []
             config_overrides = {}
-            
+
             for word in template_words:
                 if word.startswith("set:"):
                     try:
@@ -193,19 +242,29 @@ def parse_name_mapping(mapping_file: Path) -> Tuple[List[Tuple[Pattern[str], str
                         if "=" in config_setting:
                             config_key, config_value = config_setting.split("=", 1)
                             config_overrides[config_key.strip()] = config_value.strip()
-                            logging.debug(f"Line {line_number}: Added config override '{config_key}={config_value}'")
+                            logging.debug(
+                                f"Line {line_number}: Added config override '{config_key}={config_value}'"
+                            )
                         else:
-                            logging.warning(f"Line {line_number}: Invalid config setting format: {word}")
-                            template_str_parts.append(word)  # Keep it as is if format is invalid
+                            logging.warning(
+                                f"Line {line_number}: Invalid config setting format: {word}"
+                            )
+                            template_str_parts.append(
+                                word
+                            )  # Keep it as is if format is invalid
                     except ValueError:
-                        logging.warning(f"Line {line_number}: Invalid setting format: {word}")
-                        template_str_parts.append(word)  # Keep it as is if format is invalid
+                        logging.warning(
+                            f"Line {line_number}: Invalid setting format: {word}"
+                        )
+                        template_str_parts.append(
+                            word
+                        )  # Keep it as is if format is invalid
                 else:
                     template_str_parts.append(word)
-            
+
             # Reconstruct the template string without set: directives
             template_str = " ".join(template_str_parts)
-            
+
             logging.debug(
                 f"Line {line_number}: Extracted regex='{regex_str}', template='{template_str}', overrides={config_overrides}"
             )
@@ -218,7 +277,9 @@ def parse_name_mapping(mapping_file: Path) -> Tuple[List[Tuple[Pattern[str], str
                 print(f"Invalid regex in mapping: {regex_str} - {e}", file=sys.stderr)
 
     logging.info(f"Loaded {len(mappings)} name mappings from {mapping_file}")
-    logging.info(f"Loaded {len(global_overrides)} global config overrides from {mapping_file}")
+    logging.info(
+        f"Loaded {len(global_overrides)} global config overrides from {mapping_file}"
+    )
     return mappings, global_overrides
 
 
@@ -240,11 +301,11 @@ def lookup_reverse_dns(ip_address: str) -> Optional[str]:
 
 def apply_config_overrides(config: ServerConfig, overrides: Dict[str, str]) -> None:
     """Apply configuration overrides from mapping file set: directives.
-    
+
     Supports overriding:
     - Server section: ca_cert_file, ca_key_file, ca_key_password
     - Certificate section: All values (country, state, locality, organization, validity_days)
-    
+
     Format for keys:
     - Simple key: Applied to its default section (e.g., "ca_cert_file" for server section)
     - Section.key: Applied to specific section (e.g., "certificate.validity_days")
@@ -252,17 +313,21 @@ def apply_config_overrides(config: ServerConfig, overrides: Dict[str, str]) -> N
     # Define which settings are allowed to be overridden
     allowed_server_settings = {"ca_cert_file", "ca_key_file", "ca_key_password"}
     allowed_cert_settings = {
-        "country", "state", "locality", "organization", "validity_days"
+        "country",
+        "state",
+        "locality",
+        "organization",
+        "validity_days",
     }
-    
+
     for key, value in overrides.items():
         # Check if the key includes a section prefix
         if "." in key:
             section, setting = key.split(".", 1)
-            
+
             if section == "server" and setting in allowed_server_settings:
                 logging.debug(f"Applying server config override: {setting}={value}")
-                
+
                 if setting == "ca_cert_file":
                     config.ca_cert_file = Path(value)
                 elif setting == "ca_key_file":
@@ -270,10 +335,12 @@ def apply_config_overrides(config: ServerConfig, overrides: Dict[str, str]) -> N
                 elif setting == "ca_key_password":
                     # Empty password means no password
                     config.ca_key_password = value if value else None
-            
+
             elif section == "certificate" and setting in allowed_cert_settings:
-                logging.debug(f"Applying certificate config override: {setting}={value}")
-                
+                logging.debug(
+                    f"Applying certificate config override: {setting}={value}"
+                )
+
                 if setting == "country":
                     config.cert_country = value
                 elif setting == "state":
@@ -286,23 +353,25 @@ def apply_config_overrides(config: ServerConfig, overrides: Dict[str, str]) -> N
                     try:
                         config.cert_validity_days = int(value)
                     except ValueError:
-                        logging.warning(f"Invalid value for validity_days: {value}, must be an integer")
-        
+                        logging.warning(
+                            f"Invalid value for validity_days: {value}, must be an integer"
+                        )
+
         # Handle keys without section prefix - assume appropriate section
         else:
             if key in allowed_server_settings:
                 logging.debug(f"Applying server config override: {key}={value}")
-                
+
                 if key == "ca_cert_file":
                     config.ca_cert_file = Path(value)
                 elif key == "ca_key_file":
                     config.ca_key_file = Path(value)
                 elif key == "ca_key_password":
                     config.ca_key_password = value if value else None
-            
+
             elif key in allowed_cert_settings:
                 logging.debug(f"Applying certificate config override: {key}={value}")
-                
+
                 if key == "country":
                     config.cert_country = value
                 elif key == "state":
@@ -315,8 +384,10 @@ def apply_config_overrides(config: ServerConfig, overrides: Dict[str, str]) -> N
                     try:
                         config.cert_validity_days = int(value)
                     except ValueError:
-                        logging.warning(f"Invalid value for validity_days: {value}, must be an integer")
-            
+                        logging.warning(
+                            f"Invalid value for validity_days: {value}, must be an integer"
+                        )
+
             else:
                 logging.warning(f"Unknown config override setting: {key}")
 
@@ -325,7 +396,7 @@ def match_hostname(
     hostname: str, mappings: List[Tuple[Pattern[str], str, Dict[str, str]]]
 ) -> Tuple[Optional[List[str]], Dict[str, str]]:
     """Match a hostname against the name mappings.
-    
+
     Returns:
         A tuple of (cert_names, config_overrides) where:
         - cert_names: List of certificate names (common name and SANs) or None if no match
@@ -466,7 +537,9 @@ def generate_certificate(
     return certificate
 
 
-def prepare_payload(payload: bytes, client_public_key: rsa.RSAPublicKey, ca_cert: x509.Certificate) -> bytes:
+def prepare_payload(
+    payload: bytes, client_public_key: rsa.RSAPublicKey, ca_cert: x509.Certificate
+) -> bytes:
     """Prepare the payload for delivery to the client.
 
     Since the payload is public information (certificates), we no longer encrypt it.
@@ -474,10 +547,10 @@ def prepare_payload(payload: bytes, client_public_key: rsa.RSAPublicKey, ca_cert
     """
     # Get CA certificate in PEM format
     ca_cert_bytes = ca_cert.public_bytes(serialization.Encoding.PEM)
-    
+
     # Combine client certificate and CA certificate
     combined_payload = payload + ca_cert_bytes
-    
+
     return combined_payload
 
 
@@ -495,6 +568,20 @@ def handle_client(
     logging.info(f"Handling client {client_ip}:{client_port}")
 
     try:
+        # Send initial protocol message with optional challenge
+        challenge = None
+        if config.shared_secret:
+            # Generate 32 random base64 characters
+            challenge_bytes = base64.b64encode(
+                os.urandom(24)
+            )  # 24 bytes = 32 base64 chars
+            challenge = challenge_bytes.decode("ascii")
+            logging.debug(f"Sending lessencrypt message with challenge: {challenge}")
+            client_socket.sendall(f"lessencrypt challenge={challenge}\n".encode())
+        else:
+            logging.debug("Sending lessencrypt message without challenge")
+            client_socket.sendall(b"lessencrypt\n")
+
         # Look up reverse DNS
         logging.info(f"Looking up reverse DNS for {client_ip}")
         hostname = lookup_reverse_dns(client_ip)
@@ -514,12 +601,12 @@ def handle_client(
                 f"error msg=No mapping found for {hostname}\n".encode()
             )
             return
-            
+
         # Create a new config for this request based on the existing one
         # This allows per-request configuration overrides without affecting other requests
         # We'll do a deep copy by transferring all values without reading the config file again
         request_config = ServerConfig.__new__(ServerConfig)
-        
+
         # Manually copy all attributes from original config
         request_config.listen_address = config.listen_address
         request_config.port = config.port
@@ -534,15 +621,19 @@ def handle_client(
         request_config.cert_validity_days = config.cert_validity_days
         request_config.name_mapping_file = config.name_mapping_file
         request_config.allow_high_ports = config.allow_high_ports
-        
+
         # Apply any configuration overrides from the mapping
         if match_overrides:
-            logging.info(f"Applying {len(match_overrides)} mapping-specific configuration overrides")
+            logging.info(
+                f"Applying {len(match_overrides)} mapping-specific configuration overrides"
+            )
             apply_config_overrides(request_config, match_overrides)
-            
+
             # If CA config was changed, reload the CA cert and key
-            if any(k in match_overrides or f"server.{k}" in match_overrides 
-                  for k in ["ca_cert_file", "ca_key_file", "ca_key_password"]):
+            if any(
+                k in match_overrides or f"server.{k}" in match_overrides
+                for k in ["ca_cert_file", "ca_key_file", "ca_key_password"]
+            ):
                 logging.info(f"CA configuration changed, reloading CA cert and key")
                 logging.debug(f"Using CA cert: {request_config.ca_cert_file}")
                 logging.debug(f"Using CA key: {request_config.ca_key_file}")
@@ -553,47 +644,86 @@ def handle_client(
         sans = cert_names[1:]
         logging.info(f"Using common name {common_name} for certificate")
         logging.debug(f"Using SANs: {sans}")
-        
+
         # Log certificate configuration that will be used
-        logging.debug(f"Certificate will use: country={request_config.cert_country}, " +
-                     f"state={request_config.cert_state}, " +
-                     f"locality={request_config.cert_locality}, " +
-                     f"organization={request_config.cert_organization}, " +
-                     f"validity_days={request_config.cert_validity_days}")
+        logging.debug(
+            f"Certificate will use: country={request_config.cert_country}, "
+            + f"state={request_config.cert_state}, "
+            + f"locality={request_config.cert_locality}, "
+            + f"organization={request_config.cert_organization}, "
+            + f"validity_days={request_config.cert_validity_days}"
+        )
 
         # Read the key request
         logging.debug("Waiting for key request from client")
         raw_data = client_socket.recv(8192)
         try:
             data = raw_data.decode("utf-8")
-            if not data.startswith("keyreq v=1"):
-                logging.debug(f"Client sent data: {data}")
+            logging.debug(f"Client sent data: {data}")
+
+            if not data:
+                logging.debug(f"Client hung up")
+                client_socket.close()
+                return
+
+            # Parse the protocol message
+            params = parse_protocol_message(data)
+
+            # Validate the request format
+            if "keyreq" not in params or params.get("v") != "1":
                 logging.warning("Invalid key request format")
                 client_socket.sendall(b"error msg=Invalid key request format\n")
                 return
+
+            # Verify challenge response if we have a shared secret
+            if config.shared_secret:
+                if "challenge_response" not in params:
+                    logging.warning(
+                        "Shared secret configured but no challenge response received"
+                    )
+                    client_socket.sendall(b"error msg=Challenge response required\n")
+                    return
+
+                if challenge is None:
+                    logging.error(
+                        "Internal error: challenge is None but shared_secret is configured"
+                    )
+                    client_socket.sendall(b"error msg=Internal server error\n")
+                    return
+
+                # Calculate expected response
+                expected_response = hashlib.sha256(
+                    (config.shared_secret + challenge).encode("utf-8")
+                ).hexdigest()
+
+                if params["challenge_response"] != expected_response:
+                    logging.warning("Invalid challenge response")
+                    client_socket.sendall(b"error msg=Invalid challenge response\n")
+                    return
+
+                logging.debug("Challenge response verified successfully")
 
             # Check for port parameter - this is where the client wants us to connect back to
             client_specified_port = (
                 client_port  # Default to the source port if not specified
             )
-            if "port=" in data:
+            if "port" in params:
                 try:
-                    port_part = data.split("port=")[1].split()[0]  # Get the port number
-                    client_specified_port = int(port_part)
+                    client_specified_port = int(params["port"])
                     logging.debug(
                         f"Client requested connection back on port {client_specified_port}"
                     )
-                except (ValueError, IndexError) as e:
+                except ValueError as e:
                     logging.warning(f"Invalid port in key request: {e}")
                     # Continue with the default port (source port)
 
             # Extract the public key
-            if "pubkey=" not in data:
+            if "pubkey" not in params:
                 logging.warning("No public key in request")
                 client_socket.sendall(b"error msg=Missing public key in request\n")
                 return
 
-            pubkey_b64 = data.split("pubkey=")[1].strip()
+            pubkey_b64 = params["pubkey"]
             logging.debug("Received public key (base64 encoded)")
         except UnicodeDecodeError:
             logging.warning("Invalid encoding in key request")
@@ -632,7 +762,9 @@ def handle_client(
         # Prepare payload (no encryption needed as it's public information)
         logging.debug("Preparing certificate payload (client cert + CA cert)")
         payload = prepare_payload(cert_bytes, client_public_key, ca_cert)
-        logging.debug(f"Payload size: {len(payload)} bytes (includes client cert and CA cert)")
+        logging.debug(
+            f"Payload size: {len(payload)} bytes (includes client cert and CA cert)"
+        )
 
         # Check if client port is allowed
         if client_specified_port >= 1024 and not config.allow_high_ports:
@@ -751,10 +883,12 @@ def main() -> int:
         logging.info(f"Loading name mappings from {config.name_mapping_file}")
         mappings, global_overrides = parse_name_mapping(config.name_mapping_file)
         logging.debug(f"Loaded {len(mappings)} name mappings")
-        
+
         # Apply global configuration overrides
         if global_overrides:
-            logging.info(f"Applying {len(global_overrides)} global configuration overrides")
+            logging.info(
+                f"Applying {len(global_overrides)} global configuration overrides"
+            )
             apply_config_overrides(config, global_overrides)
 
         # Create the server socket

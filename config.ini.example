@@ -18,6 +18,8 @@ ca_key_file = /etc/lessencrypt/ca.key
 # Password for the CA private key (if encrypted)
 # Leave commented out if the key is not encrypted
 # ca_key_password = your-secure-password
+#
+#shared_secret=Sup3r_S3cr3t!
 
 [certificate]
 # Certificate subject information

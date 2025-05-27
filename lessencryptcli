@@ -14,12 +14,13 @@ Handles key generation, server connection, and payload decryption.
 import argparse
 import base64
 import datetime
+import hashlib
 import os
 import socket
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -30,6 +31,30 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 DEFAULT_PORT = 334
 DEFAULT_TIMEOUT = 60
 DEFAULT_KEY_SIZE = 4096
+
+
+def parse_protocol_message(message: str) -> Dict[str, str]:
+    """Parse a protocol message into key-value pairs.
+
+    Args:
+        message: Protocol message string (e.g., "lessencrypt challenge=ABC123")
+
+    Returns:
+        Dictionary of key-value pairs from the message
+    """
+    parts = message.strip().split()
+    result = {}
+
+    for part in parts:
+        if "=" in part:
+            key, value = part.split("=", 1)
+            result[key] = value
+        else:
+            # For parts without =, use the part itself as both key and value
+            # This handles cases like "keyreq" or "lessencrypt"
+            result[part] = part
+
+    return result
 
 
 def write_file_with_permissions(
@@ -239,6 +264,7 @@ def connect_to_server(
     pubkey_b64: str,
     timeout: int,
     listening_port: int,
+    shared_secret: Optional[str] = None,
 ) -> bool:
     """Connect to the server and send the public key."""
     try:
@@ -250,8 +276,41 @@ def connect_to_server(
             # so the server knows where to connect back to
             sock.connect((server_address, server_port))
 
+            # Wait for the initial "lessencrypt" message from server
+            initial_response = sock.recv(1024).decode().strip()
+            params = parse_protocol_message(initial_response)
+
+            if "lessencrypt" not in params:
+                print(
+                    f"Expected 'lessencrypt' message, got: {initial_response}",
+                    file=sys.stderr,
+                )
+                return False
+
+            # Handle challenge if present
+            challenge_response = ""
+            if "challenge" in params:
+                if not shared_secret:
+                    print(
+                        "Server requires authentication but no shared secret provided",
+                        file=sys.stderr,
+                    )
+                    return False
+
+                challenge = params["challenge"]
+                # Calculate challenge response as SHA256 hash of shared_secret + challenge
+                response_hash = hashlib.sha256(
+                    (shared_secret + challenge).encode("utf-8")
+                ).hexdigest()
+                challenge_response = f" challenge_response={response_hash}"
+            elif shared_secret:
+                print(
+                    "Warning: Shared secret provided but server did not send challenge",
+                    file=sys.stderr,
+                )
+
             # Send the key request with our listening port
-            message = f"keyreq v=1 port={listening_port} pubkey={pubkey_b64}\n"
+            message = f"keyreq v=1 port={listening_port}{challenge_response} pubkey={pubkey_b64}\n"
             sock.sendall(message.encode())
 
             # Wait for server response
@@ -494,6 +553,11 @@ def main() -> int:
         type=int,
         help="Only renew certificate if it expires within the specified number of days",
     )
+    parser.add_argument(
+        "--shared-secret",
+        type=str,
+        help="Shared secret for server authentication (if required by server)",
+    )
     args = parser.parse_args()
 
     # Check if we should only renew when close to expiry
@@ -509,7 +573,9 @@ def main() -> int:
                     print(
                         f"Certificate still valid for more than {args.renew_within_days} days, skipping renewal"
                     )
-                    print(f"To force renewal, run without the --renew-within-days option")
+                    print(
+                        f"To force renewal, run without the --renew-within-days option"
+                    )
                     return 0
                 else:
                     print(
@@ -538,7 +604,12 @@ def main() -> int:
             f"Connecting to server {server_host}:{server_port} from port {args.port}..."
         )
         if not connect_to_server(
-            server_host, server_port, pubkey_b64, args.timeout, args.port
+            server_host,
+            server_port,
+            pubkey_b64,
+            args.timeout,
+            args.port,
+            args.shared_secret,
         ):
             return 1
 
