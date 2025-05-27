@@ -241,6 +241,7 @@ def start_listener(port: int) -> socket.socket:
     """Start listening on the specified port."""
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     listener.bind(("0.0.0.0", port))
     listener.listen(1)
     return listener
@@ -268,12 +269,13 @@ def connect_to_server(
 ) -> bool:
     """Connect to the server and send the public key."""
     try:
-        # We're already listening on the specified port, so we can't bind to it directly.
-        # Instead, we'll create a regular socket and let the OS assign a source port.
+        # Create a socket with SO_REUSEADDR and SO_REUSEPORT and bind to the same port we're listening on
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             sock.settimeout(timeout)
-            # We'll include the port we're listening on in the key request
-            # so the server knows where to connect back to
+            # Bind to the same port we're listening on so server can connect back to this port
+            sock.bind(("0.0.0.0", listening_port))
             sock.connect((server_address, server_port))
 
             # Wait for the initial "lessencrypt" message from server
@@ -309,8 +311,8 @@ def connect_to_server(
                     file=sys.stderr,
                 )
 
-            # Send the key request with our listening port
-            message = f"keyreq v=1 port={listening_port}{challenge_response} pubkey={pubkey_b64}\n"
+            # Send the key request without port parameter
+            message = f"keyreq v=1{challenge_response} pubkey={pubkey_b64}\n"
             sock.sendall(message.encode())
 
             # Wait for server response
@@ -514,7 +516,7 @@ def main() -> int:
         "--port",
         type=int,
         default=DEFAULT_PORT,
-        help="Port to connect to (default: 334, can also be specified as part of server_address using hostname:port format)",
+        help="Port to listen on and connect from (default: 334)",
     )
     parser.add_argument(
         "--timeout",

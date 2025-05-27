@@ -48,7 +48,7 @@ def parse_protocol_message(message: str) -> Dict[str, str]:
     """Parse a protocol message into key-value pairs.
 
     Args:
-        message: Protocol message string (e.g., "keyreq v=1 port=334 pubkey=ABC123")
+        message: Protocol message string (e.g., "keyreq v=1 pubkey=ABC123")
 
     Returns:
         Dictionary of key-value pairs from the message
@@ -703,19 +703,10 @@ def handle_client(
 
                 logging.debug("Challenge response verified successfully")
 
-            # Check for port parameter - this is where the client wants us to connect back to
-            client_specified_port = (
-                client_port  # Default to the source port if not specified
+            # Use the client's source port for connecting back
+            logging.debug(
+                f"Will connect back to client on port {client_port} (source port)"
             )
-            if "port" in params:
-                try:
-                    client_specified_port = int(params["port"])
-                    logging.debug(
-                        f"Client requested connection back on port {client_specified_port}"
-                    )
-                except ValueError as e:
-                    logging.warning(f"Invalid port in key request: {e}")
-                    # Continue with the default port (source port)
 
             # Extract the public key
             if "pubkey" not in params:
@@ -767,27 +758,23 @@ def handle_client(
         )
 
         # Check if client port is allowed
-        if client_specified_port >= 1024 and not config.allow_high_ports:
+        if client_port >= 1024 and not config.allow_high_ports:
             logging.warning(
-                f"Refusing to connect back to high port {client_specified_port} (allow_high_ports=false)"
+                f"Refusing to connect back to high port {client_port} (allow_high_ports=false)"
             )
             raise ValueError(
-                f"Security policy prohibits connection to high ports (>= 1024): {client_specified_port}"
+                f"Security policy prohibits connection to high ports (>= 1024): {client_port}"
             )
 
         # Connect back to the client on the requested port
-        logging.info(f"Connecting back to client at {hostname}:{client_specified_port}")
+        logging.info(f"Connecting back to client at {hostname}:{client_port}")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(config.timeout)
             try:
-                sock.connect((hostname, client_specified_port))
-                logging.debug(
-                    f"Successfully connected to {hostname}:{client_specified_port}"
-                )
+                sock.connect((hostname, client_port))
+                logging.debug(f"Successfully connected to {hostname}:{client_port}")
             except Exception as e:
-                logging.error(
-                    f"Failed to connect to {hostname}:{client_specified_port}: {e}"
-                )
+                logging.error(f"Failed to connect to {hostname}:{client_port}: {e}")
                 raise
 
             # Send the certificate
