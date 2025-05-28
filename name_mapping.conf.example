@@ -9,6 +9,8 @@
 # - fqdn: The full DNS hostname
 # - host: The hostname part (before first dot)
 # - domain: The domain part (after first dot)
+# - _1, _2, _3, ...: Numbered regex groups (if any)
+# - named groups: Any named regex groups (if any)
 #
 # Templates should output a space-separated list of names.
 # The first name will be used as the certificate's CN (Common Name),
@@ -22,6 +24,17 @@
 
 # Match all development servers, add a wildcard SAN and set validity days
 /^dev-.*\.internal\.org$/ {{ fqdn }} *.dev.internal.org set:validity_days=36
+
+# Examples using regex groups:
+
+# Use numbered groups - extract service and environment
+/^(\w+)-(\w+)\.example\.com$/ {{ _1 }}.{{ _2 }}.example.com {{ fqdn }}
+
+# Use named groups - extract service name from hostname pattern  
+/^(?P<service>\w+)-prod\.example\.com$/ {{ service }}.example.com {{ fqdn }} prod.example.com
+
+# Mixed numbered and named groups
+/^api-(?P<version>v\d+)-(\w+)\.example\.com$/ api-{{ version }}.{{ _2 }}.example.com {{ fqdn }}
 
 # Generic wildcard for all unmatched hosts 
 /.*/ {{ fqdn }}
