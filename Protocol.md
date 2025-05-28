@@ -116,7 +116,7 @@ Both certificates are concatenated without additional separators.
 
 ### Shared Secret Configuration
 
-**Server configuration** (`lessencrypt.cfg`):
+**Server configuration** (`lessencrypt.conf`):
 
 ```ini
 [server]

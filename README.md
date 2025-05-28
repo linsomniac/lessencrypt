@@ -32,23 +32,26 @@ LessEncrypt simplifies certificate management for internal systems by providing 
 ## 🚀 Installation
 
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/yourusername/lessencrypt.git
    cd lessencrypt
    ```
 
 2. Copy and modify the configuration files:
+
    ```bash
    sudo mkdir -p /etc/lessencrypt
-   sudo cp lessencrypt.cfg.example /etc/lessencrypt/lessencrypt.cfg
+   sudo cp lessencrypt.conf.example /etc/lessencrypt/lessencrypt.conf
    sudo cp name_mapping.conf.example /etc/lessencrypt/name_mapping.conf
    ```
 
 3. Configure your CA certificate and key:
+
    ```bash
    # Generate a new CA (if you don't already have one):
    openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 -out ca.crt
-   
+
    # Update paths in config.ini to point to your CA files
    ```
 
@@ -65,7 +68,8 @@ The server signs certificate requests and delivers them to clients.
 ```
 
 Options:
-- `--config`: Path to configuration file (default: /etc/lessencrypt/lessencrypt.cfg)
+
+- `--config`: Path to configuration file (default: /etc/lessencrypt/lessencrypt.conf)
 - `--listen`: IP address to listen on (overrides config file)
 - `--port`: Port to listen on (overrides config file)
 - `--timeout`: Connection timeout in seconds (overrides config file)
@@ -81,6 +85,7 @@ The client requests and receives certificates signed by the server's CA.
 ```
 
 Options:
+
 - `SERVER_ADDRESS`: Address of the LessEncrypt server (with optional port: hostname:port)
 - `OUTPUT_FILE`: Path to save the certificate
 - `--port`: Port to connect to (default: 334)
@@ -109,7 +114,7 @@ Options:
 
 ## 📝 Configuration
 
-### Server Configuration (lessencrypt.cfg)
+### Server Configuration (lessencrypt.conf)
 
 The server configuration file controls all aspects of certificate generation:
 
@@ -158,7 +163,7 @@ SSLCertificateKeyFile /path/to/certificate.key
 server {
     listen 443 ssl;
     server_name example.com;
-    
+
     ssl_certificate /path/to/certificate.crt;
     ssl_certificate_key /path/to/certificate.key;
 }
