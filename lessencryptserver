@@ -18,6 +18,7 @@ import base64
 import configparser
 import datetime
 import hashlib
+import ipaddress
 import logging
 import os
 import random
@@ -444,6 +445,23 @@ def match_hostname(
 # Session key generation removed - no longer needed as we send unencrypted payload
 
 
+def create_san_list(sans: List[str]) -> List[x509.GeneralName]:
+    """Create a list of properly formatted Subject Alternative Names.
+    
+    IP addresses are formatted as x509.IPAddress, hostnames as x509.DNSName.
+    """
+    san_list: List[x509.GeneralName] = []
+    for san in sans:
+        try:
+            # Try to parse as IP address
+            ip = ipaddress.ip_address(san)
+            san_list.append(x509.IPAddress(ip))
+        except ValueError:
+            # Not an IP address, treat as DNS name
+            san_list.append(x509.DNSName(san))
+    return san_list
+
+
 def generate_certificate(
     public_key_pem: bytes,
     common_name: str,
@@ -521,12 +539,13 @@ def generate_certificate(
         critical=False,
     )
 
-    # Add Subject Alternative Names (SANs)
-    if sans:
-        builder = builder.add_extension(
-            x509.SubjectAlternativeName([x509.DNSName(san) for san in sans]),
-            critical=False,
-        )
+    # Add Subject Alternative Names (SANs) - CN is always the first SAN
+    all_sans = [common_name] + sans
+    san_list = create_san_list(all_sans)
+    builder = builder.add_extension(
+        x509.SubjectAlternativeName(san_list),
+        critical=False,
+    )
 
     # Sign the certificate with the CA key
     certificate = builder.sign(
