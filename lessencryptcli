@@ -13,6 +13,7 @@ Handles key generation, server connection, and payload decryption.
 
 import argparse
 import base64
+import configparser
 import datetime
 import hashlib
 import os
@@ -31,6 +32,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 DEFAULT_PORT = 334
 DEFAULT_TIMEOUT = 60
 DEFAULT_KEY_SIZE = 4096
+DEFAULT_CONFIG_FILE = "/etc/lessencrypt/lessencrypt.conf"
 
 
 def parse_protocol_message(message: str) -> Dict[str, str]:
@@ -505,12 +507,41 @@ def wait_for_certificate(
         return False
 
 
+def load_config(config_file: Path) -> configparser.ConfigParser:
+    """Load configuration from the specified file."""
+    config = configparser.ConfigParser()
+    if config_file.exists():
+        config.read(config_file)
+    return config
+
+
+def get_config_value(
+    config: configparser.ConfigParser, key: str, default: Optional[str] = None
+) -> Optional[str]:
+    """Get a value from the [client] section of the config file."""
+    try:
+        return config.get("client", key)
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        return default
+
+
 def main() -> int:
     """Main function for the LessEncrypt client."""
     parser = argparse.ArgumentParser(description="LessEncrypt Client")
-    parser.add_argument("server_address", help="Address of the LessEncrypt server")
     parser.add_argument(
-        "output_file", type=Path, help="File to write the decrypted payload to"
+        "server_address", nargs="?", help="Address of the LessEncrypt server"
+    )
+    parser.add_argument(
+        "output_file",
+        nargs="?",
+        type=Path,
+        help="File to write the decrypted payload to",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_FILE,
+        help=f"Configuration file path (default: {DEFAULT_CONFIG_FILE})",
     )
     parser.add_argument(
         "--port",
@@ -531,7 +562,7 @@ def main() -> int:
         help="RSA key size in bits (default: 4096)",
     )
     parser.add_argument(
-        "--passphrase",
+        "--key-password",
         type=str,
         help="Passphrase to encrypt the private key (if not provided, the key is saved unencrypted)",
     )
@@ -561,6 +592,66 @@ def main() -> int:
         help="Shared secret for server authentication (if required by server)",
     )
     args = parser.parse_args()
+
+    # Load configuration file
+    config = load_config(args.config)
+
+    # Use config values as defaults if CLI arguments are not provided
+    if not args.server_address:
+        args.server_address = get_config_value(config, "server_address")
+        if not args.server_address:
+            parser.error(
+                "server_address is required either as argument or in config file"
+            )
+
+    if not args.output_file:
+        output_file_str = get_config_value(config, "output_file")
+        if output_file_str:
+            args.output_file = Path(output_file_str)
+        else:
+            parser.error("output_file is required either as argument or in config file")
+
+    # Override defaults with config values if CLI arguments use defaults
+    if args.port == DEFAULT_PORT:
+        config_port = get_config_value(config, "port")
+        if config_port:
+            args.port = int(config_port)
+
+    if args.timeout == DEFAULT_TIMEOUT:
+        config_timeout = get_config_value(config, "timeout")
+        if config_timeout:
+            args.timeout = int(config_timeout)
+
+    if args.key_size == DEFAULT_KEY_SIZE:
+        config_key_size = get_config_value(config, "key_size")
+        if config_key_size:
+            args.key_size = int(config_key_size)
+
+    if not args.key_password:
+        args.key_password = get_config_value(config, "key_password")
+
+    if not args.key_file:
+        config_key_file = get_config_value(config, "key_file")
+        if config_key_file:
+            args.key_file = Path(config_key_file)
+
+    if not args.ca_file:
+        config_ca_file = get_config_value(config, "ca_file")
+        if config_ca_file:
+            args.ca_file = Path(config_ca_file)
+
+    if not args.post_renew:
+        config_post_renew = get_config_value(config, "post_renew")
+        if config_post_renew:
+            args.post_renew = Path(config_post_renew)
+
+    if args.renew_within_days is None:
+        config_renew_within_days = get_config_value(config, "renew_within_days")
+        if config_renew_within_days:
+            args.renew_within_days = int(config_renew_within_days)
+
+    if not args.shared_secret:
+        args.shared_secret = get_config_value(config, "shared_secret")
 
     # Check if we should only renew when close to expiry
     if args.renew_within_days is not None:
@@ -622,7 +713,7 @@ def main() -> int:
             args.timeout,
             private_key,
             args.output_file,
-            args.passphrase,
+            args.key_password,
             args.key_file,
             args.ca_file,
         ):
@@ -642,7 +733,7 @@ def main() -> int:
 
         # Success message for key file
         if args.key_file:
-            if args.passphrase:
+            if args.key_password:
                 print(f"Encrypted private key saved to {args.key_file}")
             else:
                 print(f"Private key saved to {args.key_file}")
