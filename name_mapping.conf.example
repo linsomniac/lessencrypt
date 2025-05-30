@@ -1,6 +1,6 @@
 # LessEncrypt name mapping configuration
 #
-# Format: /regex/ template
+# Format: /regex/ template [set:values]
 #
 # Each line consists of a regular expression enclosed in slashes,
 # followed by a Jinja2 template string.
@@ -12,18 +12,32 @@
 # - _1, _2, _3, ...: Numbered regex groups (if any)
 # - named groups: Any named regex groups (if any)
 #
-# Templates should output a space-separated list of names.
-# The first name will be used as the certificate's CN (Common Name),
-# and any additional names will be added as Subject Alternative Names (SANs).
+# Templates should produce a space-separated list of names.
+# The first name will be used as the certificate's CN (Common Name) and the
+# first SAN, and any additional names will be added as Subject Alternative
+# Names (SANs).
+#
+# Additionally, the line can include settings in the form of "set:name=value".
+# - set:validity_days=30
+# - set:country=US
+#   (or "state", "locality", "organization")
+# - set:ca_cert_file=/etc/lessencrypt/certs/foo.ca
+#   (or "ca_key_file", "ca_key_password")
+# - value must be quoted if it contains spaces
+#   set:locality="San Francisco"
+#
+# You can test this file by using:
+#   lessencryptserver --test-mappings foo.example.com
+# and it will display what CN and SANs it gets mapped to.
 
 # Match all hosts in example.com domain, use it's name as the CN
 /^.*\.example\.com$/ {{ fqdn }}
 
 # Match specific host, add an SAN
-/^web01\.internal\.org$/ {{ fqdn }} web.internal.org
+/^web01\.example\.org$/ {{ fqdn }} web.example.org
 
 # Match all development servers, add a wildcard SAN and set validity days
-/^dev-.*\.internal\.org$/ {{ fqdn }} *.dev.internal.org set:validity_days=36
+/^dev-.*\.example\.org$/ {{ fqdn }} *.dev.example.org set:validity_days=36
 
 # Examples using regex groups:
 

@@ -45,6 +45,131 @@ DEFAULT_CONFIG_FILE = "/etc/lessencrypt/lessencrypt.conf"
 DEFAULT_MAPPING_FILE = "/etc/lessencrypt/name_mapping.conf"
 
 
+def tokenize_template_line(
+    template_part: str,
+) -> Tuple[List[str], List[Tuple[str, str]]]:
+    """Tokenize a template line that may contain quoted set: directives.
+
+    Args:
+        template_part: The template part of a mapping line (after the regex)
+
+    Returns:
+        A tuple of (template_tokens, set_directives) where:
+        - template_tokens: List of tokens that are not set: directives
+        - set_directives: List of (key, value) tuples from set: directives
+    """
+    tokens = []
+    set_directives = []
+    i = 0
+
+    while i < len(template_part):
+        # Skip whitespace
+        while i < len(template_part) and template_part[i].isspace():
+            i += 1
+
+        if i >= len(template_part):
+            break
+
+        # Find the end of the current token
+        start = i
+
+        # Check if this looks like a set: directive first
+        if template_part[i:].startswith("set:"):
+            # For set: directives, we need special handling to find the complete directive
+            i += 4  # Skip "set:"
+
+            # Find the key part (until =)
+            while (
+                i < len(template_part)
+                and template_part[i] != "="
+                and not template_part[i].isspace()
+            ):
+                i += 1
+
+            if i < len(template_part) and template_part[i] == "=":
+                i += 1  # Skip =
+
+                # Now handle the value part, which might be quoted
+                if i < len(template_part) and template_part[i] in ('"', "'"):
+                    quote_char = template_part[i]
+                    i += 1  # Skip opening quote
+
+                    # Find matching closing quote
+                    while i < len(template_part) and template_part[i] != quote_char:
+                        i += 1
+
+                    if i < len(template_part):
+                        i += 1  # Skip closing quote
+                else:
+                    # Unquoted value - go until whitespace
+                    while i < len(template_part) and not template_part[i].isspace():
+                        i += 1
+        else:
+            # Check if we're looking at a quoted string (non-set directive)
+            if template_part[i] in ('"', "'"):
+                quote_char = template_part[i]
+                i += 1  # Skip opening quote
+
+                # Find matching closing quote
+                while i < len(template_part) and template_part[i] != quote_char:
+                    i += 1
+
+                if i < len(template_part):
+                    i += 1  # Skip closing quote
+
+            else:
+                # Regular token - go until whitespace
+                while i < len(template_part) and not template_part[i].isspace():
+                    i += 1
+
+        # Extract the token
+        token = template_part[start:i]
+
+        # Check if it's a set: directive
+        if token.startswith("set:"):
+            try:
+                _, config_setting = token.split("set:", 1)
+                key, value = parse_set_directive(config_setting)
+                set_directives.append((key, value))
+            except ValueError:
+                # If parsing fails, treat it as a regular token
+                tokens.append(token)
+        else:
+            tokens.append(token)
+
+    return tokens, set_directives
+
+
+def parse_set_directive(setting: str) -> Tuple[str, str]:
+    """Parse a set: directive that may contain quoted values.
+
+    Args:
+        setting: The setting string after 'set:' (e.g., 'name=value' or 'name="quoted value"')
+
+    Returns:
+        A tuple of (key, value) where value has quotes removed if present
+
+    Raises:
+        ValueError: If the setting format is invalid
+    """
+    if "=" not in setting:
+        raise ValueError(f"Invalid setting format: missing '=' in '{setting}'")
+
+    key, value = setting.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+
+    # Handle quoted values
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        # Remove surrounding quotes
+        value = value[1:-1]
+    elif len(value) >= 2 and value.startswith("'") and value.endswith("'"):
+        # Handle single quotes too
+        value = value[1:-1]
+
+    return key, value
+
+
 def parse_protocol_message(message: str) -> Dict[str, str]:
     """Parse a protocol message into key-value pairs.
 
@@ -203,25 +328,16 @@ def parse_name_mapping(
                 if line.startswith("set:"):
                     try:
                         _, config_setting = line.split("set:", 1)
-                        if "=" in config_setting:
-                            config_key, config_value = config_setting.split("=", 1)
-                            global_overrides[config_key.strip()] = config_value.strip()
-                            logging.debug(
-                                f"Line {line_number}: Added global config override '{config_key}={config_value}'"
-                            )
-                        else:
-                            logging.warning(
-                                f"Line {line_number}: Invalid global config setting format: {line}"
-                            )
-                            print(
-                                f"Invalid global config setting format: {line}",
-                                file=sys.stderr,
-                            )
-                    except ValueError:
-                        logging.warning(
-                            f"Line {line_number}: Invalid setting format: {line}"
+                        config_key, config_value = parse_set_directive(config_setting)
+                        global_overrides[config_key] = config_value
+                        logging.debug(
+                            f"Line {line_number}: Added global config override '{config_key}={config_value}'"
                         )
-                        print(f"Invalid setting format: {line}", file=sys.stderr)
+                    except ValueError as e:
+                        logging.warning(
+                            f"Line {line_number}: Invalid setting format: {e}"
+                        )
+                        print(f"Invalid setting format: {e}", file=sys.stderr)
                 else:
                     logging.warning(
                         f"Line {line_number}: Invalid mapping format: {line}"
@@ -232,39 +348,17 @@ def parse_name_mapping(
             regex_str, template_part = match.groups()
 
             # Extract any set: directives from the template part
-            template_words = template_part.split()
-            template_str_parts = []
+            template_tokens, set_directives = tokenize_template_line(template_part)
             config_overrides = {}
 
-            for word in template_words:
-                if word.startswith("set:"):
-                    try:
-                        _, config_setting = word.split("set:", 1)
-                        if "=" in config_setting:
-                            config_key, config_value = config_setting.split("=", 1)
-                            config_overrides[config_key.strip()] = config_value.strip()
-                            logging.debug(
-                                f"Line {line_number}: Added config override '{config_key}={config_value}'"
-                            )
-                        else:
-                            logging.warning(
-                                f"Line {line_number}: Invalid config setting format: {word}"
-                            )
-                            template_str_parts.append(
-                                word
-                            )  # Keep it as is if format is invalid
-                    except ValueError:
-                        logging.warning(
-                            f"Line {line_number}: Invalid setting format: {word}"
-                        )
-                        template_str_parts.append(
-                            word
-                        )  # Keep it as is if format is invalid
-                else:
-                    template_str_parts.append(word)
+            for key, value in set_directives:
+                config_overrides[key] = value
+                logging.debug(
+                    f"Line {line_number}: Added config override '{key}={value}'"
+                )
 
             # Reconstruct the template string without set: directives
-            template_str = " ".join(template_str_parts)
+            template_str = " ".join(template_tokens)
 
             logging.debug(
                 f"Line {line_number}: Extracted regex='{regex_str}', template='{template_str}', overrides={config_overrides}"

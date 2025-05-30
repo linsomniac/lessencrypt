@@ -1,0 +1,34 @@
+{{ do_not_modify | comment }}
+
+[Unit]
+Description=LessEncrypt Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=lessencrypt
+Group=lessencrypt
+ExecStart=/usr/bin/lessencryptserver
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lessencrypt-server
+
+# Security settings
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true     # Not compatible with "uv script", requires modules to be installed
+ReadWritePaths=/etc/lessencrypt
+
+# Resource limits
+MemoryMax={{ lessencrypt_memory_limit | default('512M') }}
+CPUQuota={{ lessencrypt_cpu_quota | default('50%') }}
+
+[Install]
+WantedBy=multi-user.target

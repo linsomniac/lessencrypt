@@ -1,0 +1,69 @@
+[server]
+# IP address to listen on, default is all interfaces
+listen_address = 0.0.0.0
+# Port to listen on
+port = 334
+# Timeout in seconds for connections
+timeout = 60
+# Whether to allow connections to high ports (>=1024)
+# This is a security feature to prevent connections to unprivileged ports
+# Default is false, requiring clients to listen on a port < 1024
+allow_high_ports = false
+# Path to the hostname->CN+SAN mapping file
+mappings = /etc/lessencrypt/name_mapping.conf
+# Path to the CA certificate file (PEM format)
+ca_cert_file = /etc/lessencrypt/ca.crt
+# Path to the CA private key file (PEM format)
+ca_key_file = /etc/lessencrypt/ca.key
+# Password for the CA private key (if encrypted)
+# Leave commented out if the key is not encrypted
+# ca_key_password = your-secure-password
+#  A password to restrict clients that can speak to this server
+#  reducing DoS or replay attacks
+#shared_secret=Sup3r_S3cr3t!
+
+[certificate]
+# Certificate subject information
+country = US
+state = California
+locality = San Francisco
+organization = LessEncrypt
+# Validity period in days
+validity_days = 365
+
+[client]
+# Client configuration section for lessencryptcli
+# These settings will be used as defaults if not specified on the command line
+
+# Server address to connect to
+# server_address = lessencrypt.example.com
+
+# Output file for the certificate bundle
+# output_file = /etc/ssl/certs/mycert.pem
+
+# Port to connect from and listen on (default: 334)
+# port = 334
+
+# Connection timeout in seconds (default: 60)
+# timeout = 60
+
+# RSA key size in bits (default: 4096)
+# key_size = 4096
+
+# Passphrase to encrypt the private key (leave commented for unencrypted)
+# key_password = your-secure-passphrase
+
+# Separate file for the private key (if not specified, key is included in output_file)
+# key_file = /etc/ssl/private/mycert.key
+
+# Separate file for the CA certificate (if not specified, CA cert is included in output_file)
+# ca_file = /etc/ssl/certs/ca.pem
+
+# Script or directory to execute after certificate renewal
+# post_renew = /etc/lessencrypt/post-renew.d/
+
+# Only renew certificate if it expires within the specified number of days
+# renew_within_days = 30
+
+# Shared secret for server authentication (if required by server)
+# shared_secret = Sup3r_S3cr3t!

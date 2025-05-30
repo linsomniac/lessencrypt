@@ -3,23 +3,32 @@
 <div align="center">
 
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-CC0-green.svg)](LICENSE)
 
 </div>
 
-A lightweight, secure certificate management system for internal networks, inspired by Let's Encrypt but designed for self-signed certificates and internal PKI.
+> **An ultra-lightweight, no-hassle alternative to Let's Encrypt—built for self-signed certs like in homelabs and dev environments.**
+
+LessEncrypt is a minimalist certificate management tool for environments where full
+ACME infrastructure is overkill. Designed with simplicity and self-signed CAs in mind,
+LessEncrypt handles certificate updates and skips all the complexity you don’t need.
+
+No HTTP challenges. No domain validation hoops. No HTTP port wrangling. Just your certs, on your terms.
 
 ## 🔑 Overview
 
 LessEncrypt simplifies certificate management for internal systems by providing an automated way to issue and deploy SSL/TLS certificates signed by your own Certificate Authority (CA). This is ideal for development environments, internal services, and private networks where public CA-signed certificates aren't necessary.
 
-### Key Features
+### ✨ Key Features
 
 - **Automated Certificate Issuance** - Request and receive certificates with a simple command
 - **Secure Key Exchange** - Uses public key cryptography for secure certificate delivery
-- **Hostname-Based Mapping** - Flexible hostname-to-certificate mapping via regex patterns
-- **Security Hardening** - Protection against connections to unprivileged ports
+- **Reverse DNS-Based Mapping** - Flexible hostname-to-certificate mapping via regex patterns
+- **Security Hardening** - Protection against replay and DoS attacks via an optional shared secret
 - **Simple Deployment** - Easy to integrate with web servers like Apache and Nginx
+- **No HTTP Port Takover** - No need to publish a WKS on the HTTP port
+- **Runs Post-Cert Scripts** - Scripts to post-process or load certs, restart web servers, etc
+- **Smart Certificate Renewal** - Can update certs only when previous cert is about to expire
 
 ## 📋 Requirements
 
@@ -28,6 +37,18 @@ LessEncrypt simplifies certificate management for internal systems by providing 
   - cryptography
   - jinja2
   - dnspython
+- Reverse DNS mappings for hosts
+- Port 334/tcp open on client and server (can be configured, <1024 recommended)
+
+## ⚙️ Overview
+
+LessEncrypt uses the reverse DNS of a connecting host, plus a "mapping" configuration
+file to generate certificates, controlling CNs and SANs on the cert. Any reverse resolution
+can be used, for example an /etc/hosts file on the machine running LessEncrypt.
+
+The client connects in and sends a public key. The server generates a certificate based
+on the reverse DNS, connects back to the client and delivers the signed cert. The
+connection back to a well known <1024 port is how it ensures the client identity.
 
 ## 🚀 Installation
 
@@ -51,11 +72,15 @@ LessEncrypt simplifies certificate management for internal systems by providing 
    ```bash
    # Generate a new CA (if you don't already have one):
    openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 -out ca.crt
+   #  Ensure your ca.key is mode 600 to protect it:
+   chmod 600 ca.key
 
    # Update paths in config.ini to point to your CA files
    ```
 
 4. Update the hostname mappings in the mapping file.
+
+5. Run "lessencryptserver". A "systemd" file is provided.
 
 ## 🛠️ Usage
 
@@ -64,7 +89,9 @@ LessEncrypt simplifies certificate management for internal systems by providing 
 The server signs certificate requests and delivers them to clients.
 
 ```bash
-./lessencryptserver [--config CONFIG_PATH] [--listen IP] [--port PORT] [--timeout SECONDS] [--verbose] [--debug]
+usage: lessencryptserver [-h] [--config CONFIG] [--listen LISTEN] [--port PORT] [--timeout TIMEOUT] [--verbose]
+                         [--debug] [--test-mappings]
+                         [hostnames ...]
 ```
 
 Options:
@@ -75,13 +102,18 @@ Options:
 - `--timeout`: Connection timeout in seconds (overrides config file)
 - `--verbose`: Enable verbose logging (INFO level)
 - `--debug`: Enable debug logging (DEBUG level)
+- `--test-mappings`: Test hostname mappings instead of running server, list
+  hostnames to test on the command line
 
 ### Client (lessencryptcli)
 
 The client requests and receives certificates signed by the server's CA.
 
 ```bash
-./lessencryptcli SERVER_ADDRESS OUTPUT_FILE [--port PORT] [--timeout SECONDS] [--key-size BITS] [--passphrase PASSPHRASE]
+usage: lessencryptcli [-h] [--config CONFIG] [--port PORT] [--timeout TIMEOUT] [--key-size KEY_SIZE]
+       [--key-password KEY_PASSWORD] [--key-file KEY_FILE] [--ca-file CA_FILE] [--post-renew POST_RENEW]
+       [--renew-within-days RENEW_WITHIN_DAYS] [--shared-secret SHARED_SECRET]
+       [server_address] [output_file]
 ```
 
 Options:
@@ -175,4 +207,5 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is released under the [CC0 1.0 Universal (Public Domain Dedication)](https://creativecommons.org/publicdomain/zero/1.0/).  
+Use it. Fork it. Rewrite it. No attribution necessary.
