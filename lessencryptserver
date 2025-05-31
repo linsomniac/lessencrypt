@@ -269,6 +269,12 @@ class ServerConfig:
 
             # Authentication settings
             self.shared_secret = config.get("server", "shared_secret", fallback=None)
+
+            # Certificate logging settings
+            cert_logfile_str = config.get("server", "cert_logfile", fallback=None)
+            self.cert_logfile: Optional[Path] = None
+            if cert_logfile_str:
+                self.cert_logfile = Path(cert_logfile_str)
         except (configparser.NoSectionError, configparser.NoOptionError) as e:
             error_msg = (
                 f"Fatal error: Missing required configuration in {config_file}: {e}"
@@ -664,13 +670,61 @@ def generate_certificate(
     return certificate
 
 
+def log_certificate_issuance(
+    certificate: x509.Certificate, common_name: str, cert_logfile: Optional[Path]
+) -> None:
+    """Log certificate issuance in standard certificate log format.
+
+    Format: V       expiry_date           serial_number      filename  /subject_dn
+    Example: V       260528232830Z           4839D1787BC5C824        foo.example.com.crt  /C=US/ST=California/L=San Francisco/O=Example/CN=foo.example.com/emailAddress=sysadm@example.com
+    """
+    if not cert_logfile:
+        return
+
+    try:
+        # Format the expiry date as YYMMDDHHMMSSZ
+        expiry = certificate.not_valid_after.strftime("%y%m%d%H%M%SZ")
+
+        # Format serial number as uppercase hex
+        serial_hex = f"{certificate.serial_number:X}"
+
+        # Generate certificate filename
+        cert_filename = f"{common_name}.crt"
+
+        # Format subject DN
+        subject_parts = []
+        for attribute in certificate.subject:
+            oid_name = {
+                NameOID.COUNTRY_NAME: "C",
+                NameOID.STATE_OR_PROVINCE_NAME: "ST",
+                NameOID.LOCALITY_NAME: "L",
+                NameOID.ORGANIZATION_NAME: "O",
+                NameOID.COMMON_NAME: "CN",
+                NameOID.EMAIL_ADDRESS: "emailAddress",
+            }.get(attribute.oid, str(attribute.oid))
+            subject_parts.append(f"{oid_name}={attribute.value}")
+
+        subject_dn = "/" + "/".join(subject_parts)
+
+        # Format the log entry
+        log_entry = f"V\t{expiry}\t\t\t{serial_hex}\t{cert_filename}\t{subject_dn}\n"
+
+        # Append to log file
+        with open(cert_logfile, "a") as f:
+            f.write(log_entry)
+
+        logging.debug(f"Logged certificate issuance to {cert_logfile}")
+
+    except Exception as e:
+        logging.warning(f"Failed to log certificate issuance: {e}")
+
+
 def prepare_payload(
     payload: bytes, client_public_key: rsa.RSAPublicKey, ca_cert: x509.Certificate
 ) -> bytes:
     """Prepare the payload for delivery to the client.
 
-    Since the payload is public information (certificates), we no longer encrypt it.
-    We return the client certificate followed by the CA certificate.
+    Encrypts the certificate payload using the client's public key for secure delivery.
     """
     # Get CA certificate in PEM format
     ca_cert_bytes = ca_cert.public_bytes(serialization.Encoding.PEM)
@@ -678,7 +732,48 @@ def prepare_payload(
     # Combine client certificate and CA certificate
     combined_payload = payload + ca_cert_bytes
 
-    return combined_payload
+    # Encrypt the payload using the client's public key
+    # Since RSA can only encrypt small amounts of data, we'll use hybrid encryption:
+    # 1. Generate a random AES key
+    # 2. Encrypt the payload with AES
+    # 3. Encrypt the AES key with RSA
+    # 4. Return: encrypted_aes_key + encrypted_payload
+
+    # Generate a random 256-bit AES key
+    aes_key = os.urandom(32)
+
+    # Generate a random 128-bit IV for AES-GCM
+    iv = os.urandom(16)
+
+    # Encrypt the payload with AES-GCM
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    aesgcm = AESGCM(aes_key)
+    encrypted_payload = aesgcm.encrypt(iv, combined_payload, None)
+
+    # Encrypt the AES key with the client's RSA public key
+    oaep_padding = padding.OAEP(
+        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+        algorithm=hashes.SHA256(),
+        label=None,
+    )
+    encrypted_aes_key = client_public_key.encrypt(
+        aes_key,
+        oaep_padding,
+    )
+
+    # Format: 4 bytes key length + encrypted key + 4 bytes IV length + IV + encrypted payload
+    import struct
+
+    result = (
+        struct.pack(">I", len(encrypted_aes_key))
+        + encrypted_aes_key
+        + struct.pack(">I", len(iv))
+        + iv
+        + encrypted_payload
+    )
+
+    return result
 
 
 def handle_client(
@@ -695,19 +790,12 @@ def handle_client(
     logging.info(f"Handling client {client_ip}:{client_port}")
 
     try:
-        # Send initial protocol message with optional challenge
-        challenge = None
-        if config.shared_secret:
-            # Generate 32 random base64 characters
-            challenge_bytes = base64.b64encode(
-                os.urandom(24)
-            )  # 24 bytes = 32 base64 chars
-            challenge = challenge_bytes.decode("ascii")
-            logging.debug(f"Sending lessencrypt message with challenge: {challenge}")
-            client_socket.sendall(f"lessencrypt challenge={challenge}\n".encode())
-        else:
-            logging.debug("Sending lessencrypt message without challenge")
-            client_socket.sendall(b"lessencrypt\n")
+        # Send initial protocol message with challenge (always send challenge now)
+        # Generate 32 random base64 characters
+        challenge_bytes = base64.b64encode(os.urandom(24))  # 24 bytes = 32 base64 chars
+        challenge = challenge_bytes.decode("ascii")
+        logging.debug(f"Sending lessencrypt message with challenge: {challenge}")
+        client_socket.sendall(f"lessencrypt challenge={challenge}\n".encode())
 
         # Look up reverse DNS
         logging.info(f"Looking up reverse DNS for {client_ip}")
@@ -748,6 +836,7 @@ def handle_client(
         request_config.cert_validity_days = config.cert_validity_days
         request_config.name_mapping_file = config.name_mapping_file
         request_config.allow_high_ports = config.allow_high_ports
+        request_config.cert_logfile = config.cert_logfile
 
         # Apply any configuration overrides from the mapping
         if match_overrides:
@@ -802,33 +891,16 @@ def handle_client(
                 client_socket.sendall(b"error msg=Invalid key request format\n")
                 return
 
-            # Verify challenge response if we have a shared secret
-            if config.shared_secret:
-                if "challenge_response" not in params:
-                    logging.warning(
-                        "Shared secret configured but no challenge response received"
-                    )
-                    client_socket.sendall(b"error msg=Challenge response required\n")
-                    return
+            # Verify signed challenge response (always required now)
+            if "challenge_signature" not in params:
+                logging.warning("Challenge signature required but not received")
+                client_socket.sendall(b"error msg=Challenge signature required\n")
+                return
 
-                if challenge is None:
-                    logging.error(
-                        "Internal error: challenge is None but shared_secret is configured"
-                    )
-                    client_socket.sendall(b"error msg=Internal server error\n")
-                    return
-
-                # Calculate expected response
-                expected_response = hashlib.sha256(
-                    (config.shared_secret + challenge).encode("utf-8")
-                ).hexdigest()
-
-                if params["challenge_response"] != expected_response:
-                    logging.warning("Invalid challenge response")
-                    client_socket.sendall(b"error msg=Invalid challenge response\n")
-                    return
-
-                logging.debug("Challenge response verified successfully")
+            if challenge is None:
+                logging.error("Internal error: challenge is None")
+                client_socket.sendall(b"error msg=Internal server error\n")
+                return
 
             # Use the client's source port for connecting back
             logging.debug(
@@ -859,6 +931,38 @@ def handle_client(
             client_socket.sendall(f"error msg=Invalid public key: {e}\n".encode())
             return
 
+        # Verify the challenge signature
+        try:
+            challenge_signature_b64 = params["challenge_signature"]
+            challenge_signature = base64.b64decode(challenge_signature_b64)
+
+            # Prepare the message that was signed by the client
+            if config.shared_secret:
+                signed_message = (config.shared_secret + challenge).encode("utf-8")
+                logging.debug("Verifying signature of challenge+shared_secret")
+            else:
+                signed_message = challenge.encode("utf-8")
+                logging.debug("Verifying signature of challenge only")
+
+            # Verify the signature using the client's public key
+            pss_padding = padding.PSS(  # type: ignore[no-untyped-call]
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            )
+            client_public_key.verify(
+                challenge_signature,
+                signed_message,
+                pss_padding,
+                hashes.SHA256(),
+            )
+            logging.debug("Challenge signature verified successfully")
+        except Exception as e:
+            logging.warning(f"Invalid challenge signature: {e}")
+            client_socket.sendall(
+                f"error msg=Invalid challenge signature: {e}\n".encode()
+            )
+            return
+
         # Send acknowledgment
         logging.debug("Sending acknowledgment to client")
         client_socket.sendall(b"ok\n")
@@ -872,6 +976,9 @@ def handle_client(
         logging.debug(
             f"Certificate generated with serial number {certificate.serial_number} (hex: {certificate.serial_number:x})"
         )
+
+        # Log certificate issuance if logging is enabled
+        log_certificate_issuance(certificate, common_name, request_config.cert_logfile)
 
         # Serialize the certificate
         cert_bytes = certificate.public_bytes(serialization.Encoding.PEM)
@@ -905,9 +1012,9 @@ def handle_client(
                 raise
 
             # Send the certificate
-            logging.debug("Sending certificate to client")
-            # Make sure there's a clear separation between the text header and payload
-            sock.sendall(f"cert v=2 payloadlength={len(payload)}\n".encode())
+            logging.debug("Sending encrypted certificate to client")
+            # Use protocol version 3 to indicate encrypted payload
+            sock.sendall(f"cert v=3 payloadlength={len(payload)}\n".encode())
 
             # Small delay to ensure header and payload don't get mixed in TCP buffer
             import time
@@ -1002,6 +1109,11 @@ def main() -> int:
         help="Enable debug logging (DEBUG level)",
     )
     parser.add_argument(
+        "--cert-logfile",
+        type=Path,
+        help="Path to certificate log file (overrides config file)",
+    )
+    parser.add_argument(
         "--test-mappings",
         action="store_true",
         help="Test hostname mappings instead of running server",
@@ -1049,6 +1161,9 @@ def main() -> int:
         if args.timeout:
             logging.info(f"Overriding timeout with {args.timeout} seconds")
             config.timeout = args.timeout
+        if args.cert_logfile:
+            logging.info(f"Overriding certificate log file with {args.cert_logfile}")
+            config.cert_logfile = args.cert_logfile
 
         # Load CA certificate and key
         logging.info(f"Loading CA certificate from {config.ca_cert_file}")

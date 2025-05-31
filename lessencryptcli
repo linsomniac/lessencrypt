@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 from cryptography import x509
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 # We keep the padding import in case we need to handle v1 protocol in the future
@@ -265,6 +265,7 @@ def connect_to_server(
     server_address: str,
     server_port: int,
     pubkey_b64: str,
+    private_key: rsa.RSAPrivateKey,
     timeout: int,
     listening_port: int,
     shared_secret: Optional[str] = None,
@@ -291,30 +292,37 @@ def connect_to_server(
                 )
                 return False
 
-            # Handle challenge if present
-            challenge_response = ""
-            if "challenge" in params:
-                if not shared_secret:
-                    print(
-                        "Server requires authentication but no shared secret provided",
-                        file=sys.stderr,
-                    )
-                    return False
-
-                challenge = params["challenge"]
-                # Calculate challenge response as SHA256 hash of shared_secret + challenge
-                response_hash = hashlib.sha256(
-                    (shared_secret + challenge).encode("utf-8")
-                ).hexdigest()
-                challenge_response = f" challenge_response={response_hash}"
-            elif shared_secret:
+            # Handle challenge (always required now)
+            if "challenge" not in params:
                 print(
-                    "Warning: Shared secret provided but server did not send challenge",
+                    "Server did not send required challenge",
                     file=sys.stderr,
                 )
+                return False
 
-            # Send the key request without port parameter
-            message = f"keyreq v=1{challenge_response} pubkey={pubkey_b64}\n"
+            challenge = params["challenge"]
+            # Prepare message to sign: challenge+shared_secret or challenge alone
+            if shared_secret:
+                message_to_sign = (shared_secret + challenge).encode("utf-8")
+            else:
+                message_to_sign = challenge.encode("utf-8")
+
+            # Sign the message with the private key
+            pss_padding = padding.PSS(  # type: ignore[no-untyped-call]
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            )
+            challenge_signature = private_key.sign(
+                message_to_sign,
+                pss_padding,
+                hashes.SHA256(),
+            )
+            challenge_signature_b64 = base64.b64encode(challenge_signature).decode(
+                "ascii"
+            )
+
+            # Send the key request with challenge signature
+            message = f"keyreq v=1 challenge_signature={challenge_signature_b64} pubkey={pubkey_b64}\n"
             sock.sendall(message.encode())
 
             # Wait for server response
@@ -369,20 +377,31 @@ def wait_for_certificate(
                     header = header_data[: newline_pos + 1].decode("utf-8")
                     remaining_data = header_data[newline_pos + 1 :]
 
-                # Check for both v1 (encrypted) and v2 (unencrypted) protocol versions
+                # Check for different protocol versions
+                is_encrypted = False
                 if header.startswith("cert v=1 payloadlength="):
                     print(
                         "Warning: Server is using deprecated encrypted protocol v1",
                         file=sys.stderr,
                     )
                     print(
-                        "Please update server to use unencrypted protocol v2",
+                        "Please update server to use current protocol v3",
                         file=sys.stderr,
                     )
                     return False
                 elif header.startswith("cert v=2 payloadlength="):
-                    # This is the current protocol version (unencrypted)
-                    pass
+                    print(
+                        "Warning: Server is using deprecated unencrypted protocol v2",
+                        file=sys.stderr,
+                    )
+                    print(
+                        "Please update server to use current protocol v3",
+                        file=sys.stderr,
+                    )
+                    return False
+                elif header.startswith("cert v=3 payloadlength="):
+                    # This is the current protocol version (encrypted)
+                    is_encrypted = True
                 else:
                     print("Invalid certificate header", file=sys.stderr)
                     return False
@@ -413,9 +432,60 @@ def wait_for_certificate(
                 )
                 return False
 
-            # In protocol v2, the payload is the certificate directly (no encryption)
-            # The payload should contain both client cert and CA cert
-            decrypted = payload
+            # Handle payload based on protocol version
+            if is_encrypted:
+                # Protocol v3: decrypt the payload
+                try:
+                    import struct
+
+                    # Parse the encrypted payload format:
+                    # 4 bytes key length + encrypted key + 4 bytes IV length + IV + encrypted payload
+                    offset = 0
+
+                    # Read encrypted AES key length
+                    key_length = struct.unpack(">I", payload[offset : offset + 4])[0]
+                    offset += 4
+
+                    # Read encrypted AES key
+                    encrypted_aes_key = payload[offset : offset + key_length]
+                    offset += key_length
+
+                    # Read IV length
+                    iv_length = struct.unpack(">I", payload[offset : offset + 4])[0]
+                    offset += 4
+
+                    # Read IV
+                    iv = payload[offset : offset + iv_length]
+                    offset += iv_length
+
+                    # Read encrypted certificate data
+                    encrypted_cert_data = payload[offset:]
+
+                    # Decrypt the AES key using the private key
+                    oaep_padding = padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=None,
+                    )
+                    aes_key = private_key.decrypt(
+                        encrypted_aes_key,
+                        oaep_padding,
+                    )
+
+                    # Decrypt the certificate data using AES-GCM
+                    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+                    aesgcm = AESGCM(aes_key)
+                    decrypted = aesgcm.decrypt(iv, encrypted_cert_data, None)
+
+                except Exception as e:
+                    print(
+                        f"Failed to decrypt certificate payload: {e}", file=sys.stderr
+                    )
+                    return False
+            else:
+                # Protocol v2: unencrypted payload (deprecated)
+                decrypted = payload
 
             # Split the client cert and CA cert if present
             # PEM certificates are delimited by the standard header/footer
@@ -700,6 +770,7 @@ def main() -> int:
             server_host,
             server_port,
             pubkey_b64,
+            private_key,
             args.timeout,
             args.port,
             args.shared_secret,
