@@ -19,6 +19,11 @@ No HTTP challenges. No domain validation hoops. No HTTP port wrangling. Just you
 
 LessEncrypt simplifies certificate management for internal systems by providing an automated way to issue and deploy SSL/TLS certificates signed by your own Certificate Authority (CA). This is ideal for development environments, internal services, and private networks where public CA-signed certificates aren't necessary.
 
+Like LetsEncrypt/ACME, LessEncrypt uses a socket in the <1024 range to validate that a request is coming
+from a "responsible party". It then delivers a signed certificate back to that system in a secure way,
+preventing interception. Reverse DNS is used to determine what names are allowed for the cert to be issued
+to.
+
 ### ✨ Key Features
 
 - **Automated Certificate Issuance** - Request and receive certificates with a simple command
