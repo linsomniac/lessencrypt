@@ -11,6 +11,9 @@ timeout = 60
 allow_high_ports = false
 # Path to the hostname->CN+SAN mapping file
 mappings = /etc/lessencrypt/name_mapping.conf
+#  A log of the issued certificates, in OpenSSL "CA database" format:
+#    <status>   <expiry-time>   <revocation-time_or_blank>   <serial-hex>   <cert-filename>   <subject-DN>
+#cert_logfile = /etc/lessencrypt/certs.txt
 # Path to the CA certificate file (PEM format)
 ca_cert_file = /etc/lessencrypt/ca.crt
 # Path to the CA private key file (PEM format)
@@ -35,13 +38,15 @@ validity_days = 365
 # Client configuration section for lessencryptcli
 # These settings will be used as defaults if not specified on the command line
 
-# Server address to connect to
+# Server address to connect to, can contain ":port" if the port is different
+# than the "port" setting below.
 # server_address = lessencrypt.example.com
 
 # Output file for the certificate bundle
 # output_file = /etc/ssl/certs/mycert.pem
 
 # Port to connect from and listen on (default: 334)
+# Also the port to connect to if ":port" is not specified in "server_address".
 # port = 334
 
 # Connection timeout in seconds (default: 60)

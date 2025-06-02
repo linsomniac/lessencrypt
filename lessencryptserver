@@ -618,6 +618,7 @@ def generate_certificate(
     builder = builder.not_valid_after(
         now + datetime.timedelta(days=config.cert_validity_days)
     )
+    logging.debug(f"Built cert with {config.cert_validity_days=}")
 
     # Set the public key
     builder = builder.public_key(public_key)
