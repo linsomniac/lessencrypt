@@ -1014,7 +1014,7 @@ def handle_client(
             # Send the certificate
             logging.debug("Sending encrypted certificate to client")
             # Use protocol version 3 to indicate encrypted payload
-            sock.sendall(f"cert v=3 payloadlength={len(payload)}\n".encode())
+            sock.sendall(f"cert v=1 payloadlength={len(payload)}\n".encode())
 
             # Small delay to ensure header and payload don't get mixed in TCP buffer
             import time

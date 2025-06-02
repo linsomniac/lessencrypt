@@ -19,7 +19,7 @@ LessEncrypt is a certificate encryption and decryption system with a client-serv
 7. **Server generates** certificate signed by its CA
 8. **Server connects back** to client on port they connected to server on
 9. **Server sends** encrypted certificate payload using hybrid encryption (RSA + AES-GCM)
-   `cert v=3 payloadlength=6982\n<payload>`
+   `cert v=1 payloadlength=6982\n<payload>`
 10. **Client decrypts** certificate payload using private key
 11. **Client saves** certificate and private key to files
 
@@ -84,7 +84,7 @@ Common error messages:
 **Header (v1 - encrypted):**
 
 ```
-cert v=3 payloadlength=<LENGTH>\n
+cert v=1 payloadlength=<LENGTH>\n
 ```
 
 **Payload (v1 - hybrid encrypted):**
@@ -125,7 +125,7 @@ shared_secret = your_secret_here
 shared_secret = your_secret_here
 ```
 
-### Challenge-Signature Mechanism (v3)
+### Challenge-Signature Mechanism (v1)
 
 1. **Challenge Generation**: Server generates 24 random bytes, encodes as base64 (32 characters)
 2. **Message Preparation**: Client prepares message to sign:

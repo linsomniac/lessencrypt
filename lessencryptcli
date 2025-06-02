@@ -380,26 +380,6 @@ def wait_for_certificate(
                 # Check for different protocol versions
                 is_encrypted = False
                 if header.startswith("cert v=1 payloadlength="):
-                    print(
-                        "Warning: Server is using deprecated encrypted protocol v1",
-                        file=sys.stderr,
-                    )
-                    print(
-                        "Please update server to use current protocol v3",
-                        file=sys.stderr,
-                    )
-                    return False
-                elif header.startswith("cert v=2 payloadlength="):
-                    print(
-                        "Warning: Server is using deprecated unencrypted protocol v2",
-                        file=sys.stderr,
-                    )
-                    print(
-                        "Please update server to use current protocol v3",
-                        file=sys.stderr,
-                    )
-                    return False
-                elif header.startswith("cert v=3 payloadlength="):
                     # This is the current protocol version (encrypted)
                     is_encrypted = True
                 else:
@@ -434,7 +414,7 @@ def wait_for_certificate(
 
             # Handle payload based on protocol version
             if is_encrypted:
-                # Protocol v3: decrypt the payload
+                # Protocol v1: decrypt the payload
                 try:
                     import struct
 
@@ -473,7 +453,8 @@ def wait_for_certificate(
                     )
 
                     # Decrypt the certificate data using AES-GCM
-                    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+                    from cryptography.hazmat.primitives.ciphers.aead import \
+                        AESGCM
 
                     aesgcm = AESGCM(aes_key)
                     decrypted = aesgcm.decrypt(iv, encrypted_cert_data, None)
@@ -483,9 +464,6 @@ def wait_for_certificate(
                         f"Failed to decrypt certificate payload: {e}", file=sys.stderr
                     )
                     return False
-            else:
-                # Protocol v2: unencrypted payload (deprecated)
-                decrypted = payload
 
             # Split the client cert and CA cert if present
             # PEM certificates are delimited by the standard header/footer
