@@ -15,7 +15,7 @@
 # Templates should produce a space-separated list of names.
 # The first name will be used as the certificate's CN (Common Name) and the
 # first SAN, and any additional names will be added as Subject Alternative
-# Names (SANs).
+# Names (SANs).  Any duplicates in the SANs will be removed.
 #
 # Additionally, the line can include settings in the form of "set:name=value".
 # - set:validity_days=30

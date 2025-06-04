@@ -655,7 +655,11 @@ def generate_certificate(
     )
 
     # Add Subject Alternative Names (SANs) - CN is always the first SAN
-    all_sans = [common_name] + sans
+    # Remove duplicates while preserving order and keeping CN first
+    all_sans = [common_name]
+    for san in sans:
+        if san not in all_sans:
+            all_sans.append(san)
     san_list = create_san_list(all_sans)
     builder = builder.add_extension(
         x509.SubjectAlternativeName(san_list),
