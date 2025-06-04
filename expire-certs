@@ -1,0 +1,299 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# ///
+"""
+expire-certs: Certificate expiry and revocation management tool for LessEncrypt
+
+Processes a certs.txt file to:
+1. Mark re-issued certificates (same cert name, earlier expiry) as revoked
+2. Remove certificates with past expiry dates
+
+Expected certs.txt format (OpenSSL certificate log format):
+status\texpiry_date\t\t\tserial_number\tfilename\tsubject_dn
+Example: V\t250801201235Z\t\t\t78CF18ACBEA0D2ED\tlocalhost.crt\t/C=US/ST=Colorado/L=Fort Collins/O=RealGo/CN=localhost
+"""
+
+import argparse
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, NamedTuple, Set
+
+
+class CertEntry(NamedTuple):
+    """Represents a certificate entry from certs.txt (OpenSSL format)"""
+
+    status: str
+    expiry_date: datetime
+    serial_number: str
+    filename: str
+    subject_dn: str
+    cert_name: str  # Extracted from CN in subject_dn
+    line_number: int
+    original_line: str
+
+
+def parse_date(date_str: str) -> datetime:
+    """Parse date string in OpenSSL format (YYMMDDHHMMSSZ)"""
+    try:
+        # Handle both 2-digit and 4-digit years
+        date_str = date_str.strip()
+        if date_str.endswith("Z"):
+            date_str = date_str[:-1]  # Remove Z suffix
+
+        if len(date_str) == 12:  # YYMMDDHHMMSS
+            # Convert 2-digit year to 4-digit (assumes 20XX for years 00-49, 19XX for 50-99)
+            year = int(date_str[:2])
+            if year <= 49:
+                year += 2000
+            else:
+                year += 1900
+            return datetime(
+                year=year,
+                month=int(date_str[2:4]),
+                day=int(date_str[4:6]),
+                hour=int(date_str[6:8]),
+                minute=int(date_str[8:10]),
+                second=int(date_str[10:12]),
+            )
+        else:
+            raise ValueError(f"Invalid date length: {len(date_str)}")
+    except (ValueError, IndexError) as e:
+        raise ValueError(
+            f"Invalid OpenSSL date format: {date_str}. Expected YYMMDDHHMMSSZ"
+        )
+
+
+def extract_cn_from_subject(subject_dn: str) -> str:
+    """Extract CN (Common Name) from subject DN"""
+    # Subject DN format: /C=US/ST=Colorado/L=Fort Collins/O=RealGo/CN=localhost
+    parts = subject_dn.split("/")
+    for part in parts:
+        if part.startswith("CN="):
+            return part[3:]  # Remove 'CN=' prefix
+    raise ValueError(f"No CN found in subject DN: {subject_dn}")
+
+
+def parse_cert_line(line: str, line_number: int) -> CertEntry:
+    """Parse a single certificate line in OpenSSL format"""
+    # Format: status\texpiry_date\t\t\tserial_number\tfilename\tsubject_dn
+    # Example: V\t250801201235Z\t\t\t78CF18ACBEA0D2ED\tlocalhost.crt\t/C=US/ST=Colorado/L=Fort Collins/O=RealGo/CN=localhost
+
+    parts = line.split("\t")
+
+    if len(parts) != 7:
+        raise ValueError(
+            f"Line {line_number}: Invalid format. Expected 7 tab-separated fields, got {len(parts)}"
+        )
+
+    status, expiry_str, empty1, empty2, serial_number, filename, subject_dn = parts
+
+    # Validate the empty fields
+    if empty1.strip() or empty2.strip():
+        raise ValueError(
+            f"Line {line_number}: Invalid format. Expected empty fields at positions 3 and 4"
+        )
+
+    try:
+        expiry_date = parse_date(expiry_str)
+    except ValueError as e:
+        raise ValueError(f"Line {line_number}: {e}")
+
+    try:
+        cert_name = extract_cn_from_subject(subject_dn)
+    except ValueError as e:
+        raise ValueError(f"Line {line_number}: {e}")
+
+    return CertEntry(
+        status=status.strip(),
+        expiry_date=expiry_date,
+        serial_number=serial_number.strip(),
+        filename=filename.strip(),
+        subject_dn=subject_dn.strip(),
+        cert_name=cert_name,
+        line_number=line_number,
+        original_line=line,
+    )
+
+
+def load_certificates(file_path: Path) -> List[CertEntry]:
+    """Load and parse certificates from file"""
+    certificates = []
+
+    try:
+        with open(file_path, "r") as f:
+            for line_number, line in enumerate(f, 1):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                try:
+                    cert = parse_cert_line(line, line_number)
+                    certificates.append(cert)
+                except ValueError as e:
+                    print(f"Warning: {e}", file=sys.stderr)
+                    continue
+
+    except FileNotFoundError:
+        print(f"Error: File {file_path} not found", file=sys.stderr)
+        sys.exit(1)
+    except PermissionError:
+        print(f"Error: Permission denied reading {file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    return certificates
+
+
+def identify_reissued_certs(certificates: List[CertEntry]) -> Set[int]:
+    """Identify certificates that have been re-issued (same name, earlier expiry)"""
+    cert_groups: Dict[str, List[CertEntry]] = {}
+
+    # Group certificates by name
+    for cert in certificates:
+        if cert.cert_name not in cert_groups:
+            cert_groups[cert.cert_name] = []
+        cert_groups[cert.cert_name].append(cert)
+
+    revoke_line_numbers = set()
+
+    # For each certificate name, find older versions
+    for cert_name, cert_list in cert_groups.items():
+        if len(cert_list) > 1:
+            # Sort by expiry date (newest first)
+            cert_list.sort(key=lambda x: x.expiry_date, reverse=True)
+
+            # Mark all but the newest as revoked (if not already revoked/expired)
+            for cert in cert_list[1:]:
+                if cert.status.upper() not in ["R", "E"]:  # R=Revoked, E=Expired
+                    revoke_line_numbers.add(cert.line_number)
+
+    return revoke_line_numbers
+
+
+def is_expired(cert: CertEntry, current_date: datetime) -> bool:
+    """Check if certificate is expired"""
+    return cert.expiry_date < current_date
+
+
+def process_certificates(file_path: Path, dry_run: bool = False) -> None:
+    """Process certificates: mark re-issued as revoked, remove expired"""
+    certificates = load_certificates(file_path)
+
+    if not certificates:
+        print("No valid certificates found in file")
+        return
+
+    current_date = datetime.now()
+
+    # Identify certificates to revoke (re-issued)
+    revoke_line_numbers = identify_reissued_certs(certificates)
+
+    # Process certificates
+    processed_lines = []
+    removed_count = 0
+    revoked_count = 0
+
+    with open(file_path, "r") as f:
+        for line_number, line in enumerate(f, 1):
+            line = line.rstrip("\n\r")
+
+            # Keep comments and empty lines
+            if not line.strip() or line.strip().startswith("#"):
+                processed_lines.append(line)
+                continue
+
+            try:
+                cert = parse_cert_line(line, line_number)
+
+                # Remove expired certificates
+                if is_expired(cert, current_date):
+                    removed_count += 1
+                    if not dry_run:
+                        print(
+                            f"Removing expired certificate: {cert.cert_name} (expired {cert.expiry_date.strftime('%Y-%m-%d')})"
+                        )
+                    continue
+
+                # Mark re-issued certificates as revoked
+                if line_number in revoke_line_numbers and cert.status.upper() != "R":
+                    # Change status from V to R (revoked)
+                    parts = line.split("\t")
+                    parts[0] = "R"  # Change status to Revoked
+                    new_line = "\t".join(parts)
+                    processed_lines.append(new_line)
+                    revoked_count += 1
+                    if not dry_run:
+                        print(
+                            f"Marking as revoked: {cert.cert_name} (superseded by newer certificate)"
+                        )
+                else:
+                    processed_lines.append(line)
+
+            except ValueError:
+                # Keep invalid lines as-is
+                processed_lines.append(line)
+
+    # Write results
+    if dry_run:
+        print(f"\nDry run results:")
+        print(f"Would remove {removed_count} expired certificates")
+        print(f"Would mark {revoked_count} certificates as revoked")
+    else:
+        # Create backup
+        backup_path = file_path.with_suffix(file_path.suffix + ".backup")
+        file_path.rename(backup_path)
+        print(f"Created backup: {backup_path}")
+
+        # Write processed file
+        with open(file_path, "w") as f:
+            f.write("\n".join(processed_lines))
+            if processed_lines:
+                f.write("\n")
+
+        print(f"Removed {removed_count} expired certificates")
+        print(f"Marked {revoked_count} certificates as revoked")
+        print(f"Updated {file_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Process certificate file to handle expired and re-issued certificates",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Expected certs.txt format (OpenSSL certificate log format):
+status<TAB>expiry_date<TAB><TAB><TAB>serial_number<TAB>filename<TAB>subject_dn
+
+Example:
+V<TAB>250801201235Z<TAB><TAB><TAB>78CF18ACBEA0D2ED<TAB>localhost.crt<TAB>/C=US/ST=Colorado/L=Fort Collins/O=RealGo/CN=localhost
+
+Status codes:
+V = Valid
+R = Revoked
+E = Expired
+
+The program will:
+1. Remove certificates with expiry dates in the past
+2. Mark re-issued certificates (same CN, earlier expiry) as 'R' (revoked)
+""",
+    )
+
+    parser.add_argument("certs_file", type=Path, help="Path to the certs.txt file")
+
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be done without making changes",
+    )
+
+    args = parser.parse_args()
+
+    if not args.certs_file.exists():
+        print(f"Error: File {args.certs_file} does not exist", file=sys.stderr)
+        sys.exit(1)
+
+    process_certificates(args.certs_file, args.dry_run)
+
+
+if __name__ == "__main__":
+    main()

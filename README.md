@@ -206,6 +206,12 @@ server {
 }
 ```
 
+## ❌ Revoking/Expiring Certs
+
+The `expire-certs` script can be used on the `certs.txt` file written by the server to
+find certs that have been reissued and mark them as "R" for revoked, and also it will
+remove from the file any certs that are past their expiry date.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
