@@ -72,3 +72,6 @@ validity_days = 365
 
 # Shared secret for server authentication (if required by server)
 # shared_secret = Sup3r_S3cr3t!
+
+# Sleep a random time up to this many seconds before requesting a cert.
+# random_sleep = 300
