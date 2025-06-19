@@ -17,9 +17,11 @@ import configparser
 import datetime
 import hashlib
 import os
+import random
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -308,7 +310,7 @@ def connect_to_server(
                 message_to_sign = challenge.encode("utf-8")
 
             # Sign the message with the private key
-            pss_padding = padding.PSS(  # type: ignore[no-untyped-call]
+            pss_padding = padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
                 salt_length=padding.PSS.MAX_LENGTH,
             )
@@ -453,8 +455,7 @@ def wait_for_certificate(
                     )
 
                     # Decrypt the certificate data using AES-GCM
-                    from cryptography.hazmat.primitives.ciphers.aead import \
-                        AESGCM
+                    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
                     aesgcm = AESGCM(aes_key)
                     decrypted = aesgcm.decrypt(iv, encrypted_cert_data, None)
@@ -639,6 +640,11 @@ def main() -> int:
         type=str,
         help="Shared secret for server authentication (if required by server)",
     )
+    parser.add_argument(
+        "--random-sleep",
+        type=int,
+        help="Sleep for a random number of seconds (0 to specified value) before certificate request to prevent thundering herd in cron jobs",
+    )
     args = parser.parse_args()
 
     # Load configuration file
@@ -701,6 +707,11 @@ def main() -> int:
     if not args.shared_secret:
         args.shared_secret = get_config_value(config, "shared_secret")
 
+    if args.random_sleep is None:
+        config_random_sleep = get_config_value(config, "random_sleep")
+        if config_random_sleep:
+            args.random_sleep = int(config_random_sleep)
+
     # Check if we should only renew when close to expiry
     if args.renew_within_days is not None:
         if args.output_file.exists():
@@ -726,6 +737,15 @@ def main() -> int:
             print(
                 f"Certificate file {args.output_file} does not exist, proceeding with initial certificate request"
             )
+
+    # AIDEV-NOTE: Random sleep feature to prevent thundering herd when multiple clients
+    # run certificate renewal simultaneously from cron jobs
+    if args.random_sleep is not None and args.random_sleep > 0:
+        sleep_duration = random.uniform(0, args.random_sleep)
+        print(
+            f"Sleeping for {sleep_duration:.2f} seconds to prevent thundering herd..."
+        )
+        time.sleep(sleep_duration)
 
     # Generate RSA key pair
     print("Generating RSA key pair...")

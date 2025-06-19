@@ -591,12 +591,12 @@ def generate_certificate(
         raise TypeError("Public key is not an RSA public key")
 
     # Create the certificate
-    builder = x509.CertificateBuilder()  # type: ignore
+    builder = x509.CertificateBuilder()
 
     # Set the subject
     builder = builder.subject_name(
         x509.Name(
-            [  # type: ignore
+            [
                 x509.NameAttribute(NameOID.COUNTRY_NAME, config.cert_country),
                 x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, config.cert_state),
                 x509.NameAttribute(NameOID.LOCALITY_NAME, config.cert_locality),
@@ -707,7 +707,10 @@ def log_certificate_issuance(
                 NameOID.COMMON_NAME: "CN",
                 NameOID.EMAIL_ADDRESS: "emailAddress",
             }.get(attribute.oid, str(attribute.oid))
-            subject_parts.append(f"{oid_name}={attribute.value}")
+            if isinstance(attribute.value, bytes):
+                subject_parts.append(f"{oid_name}={attribute.value.decode('utf-8')}")
+            else:
+                subject_parts.append(f"{oid_name}={attribute.value}")
 
         subject_dn = "/" + "/".join(subject_parts)
 
@@ -950,7 +953,7 @@ def handle_client(
                 logging.debug("Verifying signature of challenge only")
 
             # Verify the signature using the client's public key
-            pss_padding = padding.PSS(  # type: ignore[no-untyped-call]
+            pss_padding = padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
                 salt_length=padding.PSS.MAX_LENGTH,
             )
