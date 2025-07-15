@@ -39,7 +39,9 @@ validity_days = 365
 # These settings will be used as defaults if not specified on the command line
 
 # Server address to connect to, can contain ":port" if the port is different
-# than the "port" setting below.
+# than the "port" setting below. Multiple servers can be specified as comma-separated
+# values for failover support (e.g., server1.example.com:8334,server2.example.com).
+# The client will try each server in order until one successfully provides a certificate.
 # server_address = lessencrypt.example.com
 
 # Output file for the certificate bundle

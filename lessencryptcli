@@ -578,7 +578,9 @@ def main() -> int:
     """Main function for the LessEncrypt client."""
     parser = argparse.ArgumentParser(description="LessEncrypt Client")
     parser.add_argument(
-        "server_address", nargs="?", help="Address of the LessEncrypt server"
+        "server_address",
+        nargs="?",
+        help="Address of the LessEncrypt server (comma-separated for failover)",
     )
     parser.add_argument(
         "output_file",
@@ -752,40 +754,81 @@ def main() -> int:
     private_key, public_key = generate_keypair(args.key_size)
     pubkey_b64 = public_key_to_base64(public_key)
 
-    # Parse the server address to check for embedded port
-    server_host, server_port = parse_server_address(args.server_address, args.port)
+    # AIDEV-NOTE: Multi-server failover support - server_address can contain comma-separated
+    # server addresses. The client will try each server in sequence until one succeeds.
+    # This provides redundancy for certificate issuance.
+    # Parse server addresses (comma-separated for failover)
+    server_addresses = [
+        addr.strip() for addr in args.server_address.split(",") if addr.strip()
+    ]
 
-    # Start listening for the certificate
+    # Start listening for the certificate before attempting any server
     print(f"Starting listener on port {args.port}...")
     listener = start_listener(args.port)
 
     try:
-        # Connect to the server and send the public key from the same port we're listening on
-        print(
-            f"Connecting to server {server_host}:{server_port} from port {args.port}..."
-        )
-        if not connect_to_server(
-            server_host,
-            server_port,
-            pubkey_b64,
-            private_key,
-            args.timeout,
-            args.port,
-            args.shared_secret,
-        ):
-            return 1
+        # Try each server in sequence until one succeeds
+        server_errors: list[tuple[str, str]] = []
+        certificate_received = False
 
-        # Wait for the certificate
-        print("Waiting for certificate...")
-        if not wait_for_certificate(
-            listener,
-            args.timeout,
-            private_key,
-            args.output_file,
-            args.key_password,
-            args.key_file,
-            args.ca_file,
-        ):
+        for server_address in server_addresses:
+            # Parse the server address to check for embedded port
+            server_host, server_port = parse_server_address(server_address, args.port)
+
+            # Connect to the server and send the public key from the same port we're listening on
+            print(
+                f"Connecting to server {server_host}:{server_port} from port {args.port}..."
+            )
+
+            if connect_to_server(
+                server_host,
+                server_port,
+                pubkey_b64,
+                private_key,
+                args.timeout,
+                args.port,
+                args.shared_secret,
+            ):
+                # Wait for the certificate
+                print("Waiting for certificate...")
+                if wait_for_certificate(
+                    listener,
+                    args.timeout,
+                    private_key,
+                    args.output_file,
+                    args.key_password,
+                    args.key_file,
+                    args.ca_file,
+                ):
+                    certificate_received = True
+                    print(
+                        f"Successfully received certificate from {server_host}:{server_port}"
+                    )
+                    break
+                else:
+                    server_errors.append(
+                        (
+                            f"{server_host}:{server_port}",
+                            "Failed to receive certificate",
+                        )
+                    )
+            else:
+                server_errors.append(
+                    (
+                        f"{server_host}:{server_port}",
+                        "Failed to connect or authenticate",
+                    )
+                )
+
+            # If we haven't received a certificate yet and there are more servers, continue
+            if not certificate_received and server_address != server_addresses[-1]:
+                print(f"Failed with {server_host}:{server_port}, trying next server...")
+
+        # If no server succeeded, report all failures
+        if not certificate_received:
+            print("\nFailed to obtain certificate from any server:", file=sys.stderr)
+            for server, error in server_errors:
+                print(f"  {server}: {error}", file=sys.stderr)
             return 1
 
         # Success message for output file

@@ -21,6 +21,8 @@ LessEncrypt is a certificate encryption and decryption system with a client-serv
 ./lessencryptcli SERVER_ADDRESS OUTPUT_FILE [--port PORT] [--timeout SECONDS] [--key-size BITS] [--passphrase PASSPHRASE]
 ```
 
+**Note**: SERVER_ADDRESS can be a comma-separated list of servers for failover support. The client will try each server in order until one successfully provides a certificate.
+
 ### Type Checking
 ```bash
 mypy --strict lessencryptcli lessencryptserver
