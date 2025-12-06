@@ -33,6 +33,8 @@ locality = San Francisco
 organization = LessEncrypt
 # Validity period in days
 validity_days = 365
+#  if >0 add a random number of days to prevent certs from all coming due on the same day (default is 0)
+#random_skew_days=5
 
 [client]
 # Client configuration section for lessencryptcli

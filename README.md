@@ -172,6 +172,7 @@ state = California
 locality = San Francisco
 organization = YourOrganization
 validity_days = 365
+random_skew_days = 15
 ```
 
 ### Name Mapping (name_mapping.conf)

@@ -19,6 +19,7 @@
 #
 # Additionally, the line can include settings in the form of "set:name=value".
 # - set:validity_days=30
+# - set:random_skew_days=5
 # - set:country=US
 #   (or "state", "locality", "organization")
 # - set:ca_cert_file=/etc/lessencrypt/certs/foo.ca
