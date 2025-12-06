@@ -17,7 +17,6 @@ import argparse
 import base64
 import configparser
 import datetime
-import hashlib
 import ipaddress
 import logging
 import os
@@ -28,14 +27,13 @@ import sys
 import threading
 from pathlib import Path
 from re import Pattern
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import dns.resolver
 import dns.reversename
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.x509.oid import NameOID
 from jinja2 import Template
 
@@ -257,6 +255,12 @@ class ServerConfig:
             self.cert_validity_days = config.getint(
                 "certificate", "validity_days", fallback=365
             )
+            # AIDEV-NOTE: random_skew_days adds randomness to cert expiration to prevent
+            # all machines from renewing on the same day. If > 0, a random value between
+            # 0 and random_skew_days is added to cert_validity_days.
+            self.random_skew_days = config.getint(
+                "certificate", "random_skew_days", fallback=0
+            )
 
             self.name_mapping_file = Path(
                 config.get("server", "mappings", fallback=DEFAULT_MAPPING_FILE)
@@ -419,6 +423,7 @@ def apply_config_overrides(config: ServerConfig, overrides: Dict[str, str]) -> N
         "locality",
         "organization",
         "validity_days",
+        "random_skew_days",
     }
 
     for key, value in overrides.items():
@@ -457,6 +462,13 @@ def apply_config_overrides(config: ServerConfig, overrides: Dict[str, str]) -> N
                         logging.warning(
                             f"Invalid value for validity_days: {value}, must be an integer"
                         )
+                elif setting == "random_skew_days":
+                    try:
+                        config.random_skew_days = int(value)
+                    except ValueError:
+                        logging.warning(
+                            f"Invalid value for random_skew_days: {value}, must be an integer"
+                        )
 
         # Handle keys without section prefix - assume appropriate section
         else:
@@ -487,6 +499,13 @@ def apply_config_overrides(config: ServerConfig, overrides: Dict[str, str]) -> N
                     except ValueError:
                         logging.warning(
                             f"Invalid value for validity_days: {value}, must be an integer"
+                        )
+                elif key == "random_skew_days":
+                    try:
+                        config.random_skew_days = int(value)
+                    except ValueError:
+                        logging.warning(
+                            f"Invalid value for random_skew_days: {value}, must be an integer"
                         )
 
             else:
@@ -525,7 +544,7 @@ def match_hostname(
 
     # Try to match the hostname against the mappings
     for i, (regex, template_str, config_overrides) in enumerate(mappings):
-        logging.debug(f"Trying mapping #{i+1}: /{regex.pattern}/")
+        logging.debug(f"Trying mapping #{i + 1}: /{regex.pattern}/")
         match = regex.search(hostname)
         if match:
             logging.debug(f"Matched regex: /{regex.pattern}/")
@@ -591,12 +610,12 @@ def generate_certificate(
         raise TypeError("Public key is not an RSA public key")
 
     # Create the certificate
-    builder = x509.CertificateBuilder()
+    builder = x509.CertificateBuilder()  # type: ignore
 
     # Set the subject
     builder = builder.subject_name(
         x509.Name(
-            [
+            [  # type: ignore
                 x509.NameAttribute(NameOID.COUNTRY_NAME, config.cert_country),
                 x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, config.cert_state),
                 x509.NameAttribute(NameOID.LOCALITY_NAME, config.cert_locality),
@@ -615,10 +634,21 @@ def generate_certificate(
     # Set validity period
     now = datetime.datetime.now(datetime.timezone.utc)
     builder = builder.not_valid_before(now)
-    builder = builder.not_valid_after(
-        now + datetime.timedelta(days=config.cert_validity_days)
+
+    # Calculate total validity days, adding random skew if configured
+    validity_days = config.cert_validity_days
+    if config.random_skew_days > 0:
+        skew = random.randint(0, config.random_skew_days)
+        validity_days += skew
+        logging.debug(
+            f"Applied random skew of {skew} days (random_skew_days={config.random_skew_days})"
+        )
+
+    builder = builder.not_valid_after(now + datetime.timedelta(days=validity_days))
+    logging.debug(
+        f"Built cert with validity_days={validity_days} "
+        f"(base={config.cert_validity_days}, random_skew_days={config.random_skew_days})"
     )
-    logging.debug(f"Built cert with {config.cert_validity_days=}")
 
     # Set the public key
     builder = builder.public_key(public_key)
@@ -707,10 +737,7 @@ def log_certificate_issuance(
                 NameOID.COMMON_NAME: "CN",
                 NameOID.EMAIL_ADDRESS: "emailAddress",
             }.get(attribute.oid, str(attribute.oid))
-            if isinstance(attribute.value, bytes):
-                subject_parts.append(f"{oid_name}={attribute.value.decode('utf-8')}")
-            else:
-                subject_parts.append(f"{oid_name}={attribute.value}")
+            subject_parts.append(f"{oid_name}={attribute.value}")
 
         subject_dn = "/" + "/".join(subject_parts)
 
@@ -842,6 +869,7 @@ def handle_client(
         request_config.cert_locality = config.cert_locality
         request_config.cert_organization = config.cert_organization
         request_config.cert_validity_days = config.cert_validity_days
+        request_config.random_skew_days = config.random_skew_days
         request_config.name_mapping_file = config.name_mapping_file
         request_config.allow_high_ports = config.allow_high_ports
         request_config.cert_logfile = config.cert_logfile
@@ -858,7 +886,7 @@ def handle_client(
                 k in match_overrides or f"server.{k}" in match_overrides
                 for k in ["ca_cert_file", "ca_key_file", "ca_key_password"]
             ):
-                logging.info(f"CA configuration changed, reloading CA cert and key")
+                logging.info("CA configuration changed, reloading CA cert and key")
                 logging.debug(f"Using CA cert: {request_config.ca_cert_file}")
                 logging.debug(f"Using CA key: {request_config.ca_key_file}")
                 ca_cert, ca_key = load_ca_cert_and_key(request_config)
@@ -886,7 +914,7 @@ def handle_client(
             logging.debug(f"Client sent data: {data}")
 
             if not data:
-                logging.debug(f"Client hung up")
+                logging.debug("Client hung up")
                 client_socket.close()
                 return
 
@@ -953,7 +981,7 @@ def handle_client(
                 logging.debug("Verifying signature of challenge only")
 
             # Verify the signature using the client's public key
-            pss_padding = padding.PSS(
+            pss_padding = padding.PSS(  # type: ignore[no-untyped-call]
                 mgf=padding.MGF1(hashes.SHA256()),
                 salt_length=padding.PSS.MAX_LENGTH,
             )
@@ -1038,9 +1066,8 @@ def handle_client(
         print(f"Error handling client {client_ip}: {e}", file=sys.stderr)
         try:
             client_socket.sendall(f"error msg={str(e)}\n".encode())
-        except:
+        except Exception:
             logging.debug("Failed to send error message to client")
-            pass
 
 
 def test_mappings(config: ServerConfig, hostnames: List[str]) -> int:
@@ -1072,12 +1099,12 @@ def test_mappings(config: ServerConfig, hostnames: List[str]) -> int:
                 if sans:
                     print(f"  SANs: {', '.join(sans)}")
                 else:
-                    print(f"  SANs: (none)")
+                    print("  SANs: (none)")
 
                 if match_overrides:
                     print(f"  Config overrides: {match_overrides}")
             else:
-                print(f"  No mapping found")
+                print("  No mapping found")
             print()
 
         return 0

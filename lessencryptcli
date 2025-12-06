@@ -15,7 +15,6 @@ import argparse
 import base64
 import configparser
 import datetime
-import hashlib
 import os
 import random
 import socket
@@ -23,7 +22,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -216,7 +215,7 @@ def run_post_renew_scripts(post_renew_path: Path) -> int:
             print(f"Error executing script {script}: {e}", file=sys.stderr)
             return 1
 
-    print(f"All post-renew scripts completed successfully")
+    print("All post-renew scripts completed successfully")
     return 0
 
 
@@ -728,7 +727,7 @@ def main() -> int:
                         f"Certificate still valid for more than {args.renew_within_days} days, skipping renewal"
                     )
                     print(
-                        f"To force renewal, run without the --renew-within-days option"
+                        "To force renewal, run without the --renew-within-days option"
                     )
                     return 0
                 else:
