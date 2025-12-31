@@ -696,6 +696,23 @@ def generate_certificate(
         critical=False,
     )
 
+    # AIDEV-NOTE: SubjectKeyIdentifier (SKI) and AuthorityKeyIdentifier (AKI) are
+    # required by many TLS implementations for proper certificate chain validation.
+    # SKI is a hash of this certificate's public key; AKI references the CA's SKI.
+
+    # Add Subject Key Identifier (hash of this certificate's public key)
+    builder = builder.add_extension(
+        x509.SubjectKeyIdentifier.from_public_key(public_key),
+        critical=False,
+    )
+
+    # Add Authority Key Identifier (references the CA's Subject Key Identifier)
+    ca_ski = ca_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
+    builder = builder.add_extension(
+        x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ca_ski.value),
+        critical=False,
+    )
+
     # Sign the certificate with the CA key
     certificate = builder.sign(
         private_key=ca_key,
