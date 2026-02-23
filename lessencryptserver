@@ -980,7 +980,7 @@ def handle_client(
                 raise TypeError("Public key is not an RSA public key")
             logging.debug("Successfully loaded RSA public key")
         except Exception as e:
-            logging.warning(f"Invalid public key: {e}")
+            logging.warning(f"Invalid public key: {e}, key={repr(pubkey_b64)}")
             client_socket.sendall(f"error msg=Invalid public key: {e}\n".encode())
             return
 
